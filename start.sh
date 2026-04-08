@@ -346,11 +346,12 @@ run_install() {
 
     # Setup Database
     section "Setup Database MySQL"
-    pct exec $VMID -- bash -c "mysql -e \"
-        CREATE DATABASE \`$DB_NAME\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-        CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';
-        GRANT ALL ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';
-        FLUSH PRIVILEGES;\"" || error "Pembuatan database gagal"
+    pct exec $VMID -- bash -c "mysql -e \"CREATE DATABASE $DB_NAME DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\"" \
+        || error "Gagal membuat database '$DB_NAME'"
+    pct exec $VMID -- bash -c "mysql -e \"CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';\"" \
+        || error "Gagal membuat user '$DB_USER'"
+    pct exec $VMID -- bash -c "mysql -e \"GRANT ALL ON $DB_NAME.* TO '$DB_USER'@'localhost'; FLUSH PRIVILEGES;\"" \
+        || error "Gagal set privileges"
     log "Database '$DB_NAME' dan user '$DB_USER' berhasil dibuat"
 
     # Download WordPress
