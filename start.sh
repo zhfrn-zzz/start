@@ -1,9 +1,23 @@
 #!/bin/bash
 
 # ============================================================
-#  Proxmox CT Creator + WordPress Auto Installer v2.0
-#  Mode: Quick Install & Custom Install
+#  Proxmox CT Creator + WordPress Auto Installer  v3.0
+#  Flags: --verbose | --fancy | --dry-run
+#  Usage: ./wordpress-ct-setup-v3.sh [--verbose] [--fancy] [--dry-run]
 # ============================================================
+
+# ─── FLAG PARSING ────────────────────────────────────────────
+VERBOSE=false
+FANCY=false
+DRY_RUN=false
+
+for arg in "$@"; do
+    case "$arg" in
+        --verbose) VERBOSE=true ;;
+        --fancy)   FANCY=true ;;
+        --dry-run) DRY_RUN=true ;;
+    esac
+done
 
 # ─── WARNA ───────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -12,7 +26,12 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
+DIM='\033[2m'
 NC='\033[0m'
+
+# ─── LOG FILE ────────────────────────────────────────────────
+LOG_FILE="/tmp/wp-install-$(date +%Y%m%d-%H%M%S).log"
+touch "$LOG_FILE"
 
 # ─── NILAI DEFAULT ───────────────────────────────────────────
 DEFAULT_VMID=105
@@ -26,27 +45,247 @@ DEFAULT_DB_NAME="wordpress"
 DEFAULT_DB_USER="wpuser"
 DEFAULT_DB_PASS='P@ssw0rd123'
 
-# ─── KONFIGURASI PROXMOX (sesuaikan jika berbeda) ────────────
+# ─── KONFIGURASI PROXMOX ─────────────────────────────────────
 STORAGE="local-lvm"
 TEMPLATE_STORAGE="local"
 TEMPLATE="ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
 BRIDGE="vmbr0"
 
-# ─── HELPER: OUTPUT ──────────────────────────────────────────
-log()     { echo -e "${GREEN}[✓]${NC} $1"; }
-warn()    { echo -e "${YELLOW}[!]${NC} $1"; }
-error()   { echo -e "${RED}[✗]${NC} $1"; exit 1; }
-info()    { echo -e "${BLUE}[i]${NC} $1"; }
-section() { echo -e "\n${CYAN}${BOLD}─── $1 ───────────────────────────────────────${NC}"; }
+# ─── STEP TRACKING ───────────────────────────────────────────
+TOTAL_STEPS=8
+CURRENT_STEP=0
+INSTALL_START=0
 
-# ─── HELPER: INPUT ───────────────────────────────────────────
+format_time() {
+    local s=$1
+    if [ "$s" -lt 60 ]; then
+        echo "${s}s"
+    else
+        echo "$((s/60))m $((s%60))s"
+    fi
+}
+
+# ─── SPINNER ─────────────────────────────────────────────────
+SPINNER_PID=""
+
+if $FANCY; then
+    SPINNER_CHARS='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+else
+    SPINNER_CHARS='|/-\'
+fi
+
+start_spinner() {
+    local label="$1"
+    $VERBOSE && return
+    (
+        local i=0
+        local len=${#SPINNER_CHARS}
+        while true; do
+            local char="${SPINNER_CHARS:$i:1}"
+            printf "\r  ${YELLOW}%s${NC} %s   " "$char" "$label"
+            i=$(( (i+1) % len ))
+            sleep 0.12
+        done
+    ) &
+    SPINNER_PID=$!
+    disown "$SPINNER_PID"
+}
+
+stop_spinner() {
+    if [ -n "$SPINNER_PID" ]; then
+        kill "$SPINNER_PID" 2>/dev/null
+        wait "$SPINNER_PID" 2>/dev/null || true
+        SPINNER_PID=""
+        printf "\r\033[K"
+    fi
+}
+
+# ─── OUTPUT HELPERS ──────────────────────────────────────────
+log()  {
+    stop_spinner
+    echo -e "  ${GREEN}[+]${NC} $1"
+    echo "[OK]   $(date '+%H:%M:%S') $1" >> "$LOG_FILE"
+}
+warn() {
+    echo -e "  ${YELLOW}[!]${NC} $1"
+    echo "[WARN] $(date '+%H:%M:%S') $1" >> "$LOG_FILE"
+}
+info() {
+    echo -e "  ${BLUE}[i]${NC} $1"
+    echo "[INFO] $(date '+%H:%M:%S') $1" >> "$LOG_FILE"
+}
+error() {
+    stop_spinner
+    echo -e "\n  ${RED}[x]${NC} ${BOLD}$1${NC}"
+    echo "[ERR]  $(date '+%H:%M:%S') $1" >> "$LOG_FILE"
+    echo -e "  ${DIM}Log: ${LOG_FILE}${NC}"
+    exit 1
+}
+
+section() {
+    local title="$1"
+    local pad_len=$(( 46 - ${#title} ))
+    [ $pad_len -lt 0 ] && pad_len=0
+    local pad
+    if $FANCY; then
+        pad=$(printf '─%.0s' $(seq 1 $pad_len))
+        echo -e "\n${CYAN}${BOLD}  ─── ${title} ${pad}${NC}"
+    else
+        pad=$(printf -- '-%.0s' $(seq 1 $pad_len))
+        echo -e "\n${CYAN}${BOLD}  --- ${title} ${pad}${NC}"
+    fi
+}
+
+# ─── RUN STEP ────────────────────────────────────────────────
+# Usage: run_step "Label" "bash command string"
+run_step() {
+    local label="$1"
+    local cmd="$2"
+    CURRENT_STEP=$((CURRENT_STEP + 1))
+    local prefix="[${CURRENT_STEP}/${TOTAL_STEPS}]"
+    local step_start
+    step_start=$(date +%s)
+
+    echo "" >> "$LOG_FILE"
+    echo "=== ${prefix} ${label} ===" >> "$LOG_FILE"
+
+    if $VERBOSE; then
+        echo -e "  ${CYAN}${prefix}${NC} ${label}"
+        eval "$cmd" 2>&1 | tee -a "$LOG_FILE"
+        local exit_code="${PIPESTATUS[0]}"
+    else
+        start_spinner "${prefix} ${label}"
+        eval "$cmd" >> "$LOG_FILE" 2>&1
+        local exit_code=$?
+        stop_spinner
+    fi
+
+    local elapsed
+    elapsed=$(format_time $(( $(date +%s) - step_start )))
+
+    if [ "$exit_code" -eq 0 ]; then
+        echo -e "  ${GREEN}[+]${NC} ${prefix} ${label} ${DIM}(${elapsed})${NC}"
+        echo "[OK] Step selesai dalam ${elapsed}" >> "$LOG_FILE"
+    else
+        echo -e "  ${RED}[x]${NC} ${prefix} ${label} ${DIM}(${elapsed})${NC}"
+        handle_error "$label" "$cmd"
+    fi
+}
+
+# ─── ERROR RECOVERY ──────────────────────────────────────────
+handle_error() {
+    local label="$1"
+    local cmd="$2"
+
+    echo ""
+    echo -e "  ${RED}${BOLD}Gagal:${NC} ${label}"
+    echo -e "  ${DIM}Log tersimpan di: ${LOG_FILE}${NC}"
+    echo ""
+
+    while true; do
+        if $FANCY; then
+            echo -e "  ${BOLD}Pilih tindakan:${NC}"
+            echo -e "  ${CYAN}[r]${NC} Retry  — ulangi step ini"
+            echo -e "  ${CYAN}[s]${NC} Skip   — lewati, lanjut step berikutnya"
+            echo -e "  ${CYAN}[l]${NC} Log    — tampilkan 30 baris log terakhir"
+            echo -e "  ${CYAN}[a]${NC} Abort  — hentikan instalasi"
+        else
+            echo -e "  Pilih: [r] Retry  [s] Skip  [l] Log  [a] Abort"
+        fi
+        echo ""
+        read -rp "  => Pilihan (r/s/l/a): " choice
+
+        case "$choice" in
+            r|R)
+                local t_start
+                t_start=$(date +%s)
+                if $VERBOSE; then
+                    eval "$cmd" 2>&1 | tee -a "$LOG_FILE"
+                    local ec="${PIPESTATUS[0]}"
+                else
+                    start_spinner "Retry: ${label}"
+                    eval "$cmd" >> "$LOG_FILE" 2>&1
+                    local ec=$?
+                    stop_spinner
+                fi
+                local elapsed
+                elapsed=$(format_time $(( $(date +%s) - t_start )))
+                if [ "$ec" -eq 0 ]; then
+                    echo -e "  ${GREEN}[+]${NC} Retry berhasil! ${DIM}(${elapsed})${NC}"
+                    return 0
+                else
+                    echo -e "  ${RED}[x]${NC} Retry gagal lagi."
+                fi
+                ;;
+            s|S)
+                warn "Step dilewati: ${label}"
+                return 0
+                ;;
+            l|L)
+                echo ""
+                echo -e "  ${DIM}--- 30 baris terakhir log ---${NC}"
+                tail -30 "$LOG_FILE" | sed 's/^/  /'
+                echo -e "  ${DIM}--- end ---${NC}"
+                echo ""
+                ;;
+            a|A)
+                echo ""
+                error "Instalasi dihentikan oleh user."
+                ;;
+            *)
+                echo -e "  ${RED}  Ketik r, s, l, atau a.${NC}"
+                ;;
+        esac
+    done
+}
+
+# ─── BANNER ──────────────────────────────────────────────────
+show_banner() {
+    clear
+    if $FANCY; then
+        echo -e "${CYAN}${BOLD}"
+        cat << 'BANNER'
+  ╔═══════════════════════════════════════════════════╗
+  ║  __    __ ____       ____ ______ __  _  _  ____  ║
+  ║  \ \  / /|  _ \     / ___|__  __| | | || ||  _ \ ║
+  ║   \ \/ / | |_) |   | |     | |  | |_| || || |_) |║
+  ║    )  (  |  __/    | |     | |  |  _  ||_||  __/ ║
+  ║   / /\ \ | |       | |___  | |  | | | |   | |    ║
+  ║  /_/  \_\|_|        \____| |_|  |_| |_|   |_|    ║
+  ╚═══════════════════════════════════════════════════╝
+BANNER
+        echo -e "${NC}"
+    else
+        echo -e "${CYAN}${BOLD}"
+        cat << 'BANNER'
+  +---------------------------------------------------+
+  |  __    __ ____       ____ ______ __  _  _  ____  |
+  |  \ \  / /|  _ \     / ___|__  __| | | || ||  _ \ |
+  |   \ \/ / | |_) |   | |     | |  | |_| || || |_) ||
+  |    )  (  |  __/    | |     | |  |  _  ||_||  __/ |
+  |   / /\ \ | |       | |___  | |  | | | |   | |    |
+  |  /_/  \_\|_|        \____| |_|  |_| |_|   |_|    |
+  +---------------------------------------------------+
+BANNER
+        echo -e "${NC}"
+    fi
+
+    echo -e "  ${BOLD}Proxmox Container + WordPress Installer${NC}  ${DIM}v3.0${NC}"
+    echo ""
+
+    local flags=""
+    $VERBOSE && flags+=" ${YELLOW}[--verbose]${NC}"
+    $FANCY   && flags+=" ${CYAN}[--fancy]${NC}"
+    $DRY_RUN && flags+=" ${BLUE}[--dry-run]${NC}"
+    [ -n "$flags" ] && echo -e " ${flags}" && echo ""
+
+    echo -e "  ${DIM}Log: ${LOG_FILE}${NC}"
+}
+
+# ─── INPUT HELPER ────────────────────────────────────────────
 INPUT_RESULT=""
 
 get_input() {
-    # $1 = label prompt
-    # $2 = default value (opsional, Enter = pakai default)
-    # $3 = nama fungsi validator (opsional)
-    # $4 = "yes" untuk hide input (password)
     local prompt="$1"
     local default="$2"
     local validator="$3"
@@ -56,50 +295,45 @@ get_input() {
         local display
         if [ -n "$default" ]; then
             if [ "$hide" = "yes" ]; then
-                display="  ➜ $prompt [default: ****]: "
+                display="  => ${prompt} [default: ****]: "
             else
-                display="  ➜ $prompt [default: $default]: "
+                display="  => ${prompt} [default: ${default}]: "
             fi
         else
-            display="  ➜ $prompt: "
+            display="  => ${prompt}: "
         fi
 
         if [ "$hide" = "yes" ]; then
-            read -s -p "$display" INPUT_RESULT
+            read -rs -p "$display" INPUT_RESULT
             echo ""
         else
-            read -p "$display" INPUT_RESULT
+            read -rp "$display" INPUT_RESULT
         fi
 
-        # Gunakan default jika kosong
         INPUT_RESULT="${INPUT_RESULT:-$default}"
 
-        # Cek tidak boleh kosong
         if [ -z "$INPUT_RESULT" ]; then
             echo -e "  ${RED}  Field ini tidak boleh kosong. Coba lagi.${NC}"
             continue
         fi
 
-        # Jalankan validator jika ada
-        if [ -n "$validator" ]; then
-            if ! $validator "$INPUT_RESULT"; then
-                continue
-            fi
+        if [ -n "$validator" ] && ! $validator "$INPUT_RESULT"; then
+            continue
         fi
 
         break
     done
 }
 
-# ─── VALIDATOR ───────────────────────────────────────────────
+# ─── VALIDATORS ──────────────────────────────────────────────
 validate_vmid() {
-    local vmid="$1"
-    if ! [[ "$vmid" =~ ^[0-9]+$ ]] || [ "$vmid" -lt 100 ]; then
-        echo -e "  ${RED}  VMID harus berupa angka >= 100. Coba lagi.${NC}"
+    local v="$1"
+    if ! [[ "$v" =~ ^[0-9]+$ ]] || [ "$v" -lt 100 ]; then
+        echo -e "  ${RED}  VMID harus angka >= 100.${NC}"
         return 1
     fi
-    if pct status "$vmid" &>/dev/null 2>&1; then
-        echo -e "  ${RED}  CT $vmid sudah ada! Gunakan VMID lain.${NC}"
+    if pct status "$v" &>/dev/null 2>&1; then
+        echo -e "  ${RED}  CT ${v} sudah ada! Gunakan VMID lain.${NC}"
         return 1
     fi
     return 0
@@ -107,7 +341,7 @@ validate_vmid() {
 
 validate_number() {
     if ! [[ "$1" =~ ^[0-9]+$ ]] || [ "$1" -lt 1 ]; then
-        echo -e "  ${RED}  Harus berupa angka positif. Coba lagi.${NC}"
+        echo -e "  ${RED}  Harus berupa angka positif.${NC}"
         return 1
     fi
     return 0
@@ -129,23 +363,21 @@ validate_ip() {
     return 0
 }
 
-# ─── DERIVE GATEWAY OTOMATIS ─────────────────────────────────
 derive_gateway() {
     local ip="${1%/*}"
     echo "$(echo "$ip" | cut -d. -f1-3).1"
 }
 
-# ─── CEK & DOWNLOAD TEMPLATE ─────────────────────────────────
+# ─── CEK / DOWNLOAD TEMPLATE ─────────────────────────────────
 check_template() {
-    local path="/var/lib/vz/template/cache/$TEMPLATE"
+    local path="/var/lib/vz/template/cache/${TEMPLATE}"
     if [ ! -f "$path" ]; then
-        warn "Template '$TEMPLATE' tidak ditemukan."
-        info "Mengunduh template otomatis dari repositori Proxmox..."
-        pveam update || error "Gagal update daftar template"
-        pveam download $TEMPLATE_STORAGE $TEMPLATE || error "Gagal mengunduh template"
+        warn "Template '${TEMPLATE}' tidak ditemukan."
+        info "Mengunduh otomatis dari repositori Proxmox..."
+        pveam update >> "$LOG_FILE" 2>&1 || error "Gagal update daftar template"
+        pveam download "$TEMPLATE_STORAGE" "$TEMPLATE" >> "$LOG_FILE" 2>&1 \
+            || error "Gagal mengunduh template"
         log "Template berhasil diunduh"
-    else
-        log "Template ditemukan"
     fi
 }
 
@@ -153,56 +385,107 @@ check_template() {
 show_summary() {
     local ip_clean="${IP%/*}"
     local pass_mask
-    pass_mask=$(echo "$PASSWORD" | sed 's/./*/g')
+    pass_mask=$(printf '%s' "$PASSWORD" | sed 's/./*/g')
     local dbpass_mask
-    dbpass_mask=$(echo "$DB_PASS" | sed 's/./*/g')
+    dbpass_mask=$(printf '%s' "$DB_PASS" | sed 's/./*/g')
 
     echo ""
-    echo -e "${CYAN}${BOLD}┌──────────────────────────────────────────────┐${NC}"
-    echo -e "${CYAN}${BOLD}│           RINGKASAN KONFIGURASI              │${NC}"
-    echo -e "${CYAN}${BOLD}├──────────────────┬───────────────────────────┤${NC}"
-    printf "${CYAN}│${NC}  %-16s ${CYAN}│${NC}  %-25s ${CYAN}│${NC}\n" "VMID"       "$VMID"
-    printf "${CYAN}│${NC}  %-16s ${CYAN}│${NC}  %-25s ${CYAN}│${NC}\n" "Hostname"   "$HOSTNAME"
-    printf "${CYAN}│${NC}  %-16s ${CYAN}│${NC}  %-25s ${CYAN}│${NC}\n" "Password"   "$pass_mask"
-    echo -e "${CYAN}│──────────────────│───────────────────────────│${NC}"
-    printf "${CYAN}│${NC}  %-16s ${CYAN}│${NC}  %-25s ${CYAN}│${NC}\n" "Disk"       "${DISK} GB"
-    printf "${CYAN}│${NC}  %-16s ${CYAN}│${NC}  %-25s ${CYAN}│${NC}\n" "CPU"        "${CPU} core"
-    printf "${CYAN}│${NC}  %-16s ${CYAN}│${NC}  %-25s ${CYAN}│${NC}\n" "Memory"     "${MEMORY} MB"
-    printf "${CYAN}│${NC}  %-16s ${CYAN}│${NC}  %-25s ${CYAN}│${NC}\n" "Swap"       "${SWAP} MB"
-    echo -e "${CYAN}│──────────────────│───────────────────────────│${NC}"
-    printf "${CYAN}│${NC}  %-16s ${CYAN}│${NC}  %-25s ${CYAN}│${NC}\n" "IP Address" "$IP"
-    printf "${CYAN}│${NC}  %-16s ${CYAN}│${NC}  %-25s ${CYAN}│${NC}\n" "Gateway"    "$GW"
-    echo -e "${CYAN}│──────────────────│───────────────────────────│${NC}"
-    printf "${CYAN}│${NC}  %-16s ${CYAN}│${NC}  %-25s ${CYAN}│${NC}\n" "DB Name"    "$DB_NAME"
-    printf "${CYAN}│${NC}  %-16s ${CYAN}│${NC}  %-25s ${CYAN}│${NC}\n" "DB User"    "$DB_USER"
-    printf "${CYAN}│${NC}  %-16s ${CYAN}│${NC}  %-25s ${CYAN}│${NC}\n" "DB Pass"    "$dbpass_mask"
-    echo -e "${CYAN}│──────────────────│───────────────────────────│${NC}"
-    printf "${CYAN}│${NC}  %-16s ${CYAN}│${NC}  %-25s ${CYAN}│${NC}\n" "URL Akses"  "http://$ip_clean"
-    echo -e "${CYAN}${BOLD}└──────────────────┴───────────────────────────┘${NC}"
+    if $FANCY; then
+        echo -e "  ${CYAN}${BOLD}┌──────────────────────┬──────────────────────────┐${NC}"
+        echo -e "  ${CYAN}${BOLD}│  RINGKASAN           │  KONFIGURASI             │${NC}"
+        echo -e "  ${CYAN}${BOLD}├──────────────────────┼──────────────────────────┤${NC}"
+        printf "  ${CYAN}│${NC}  %-20s ${CYAN}│${NC}  %-24s ${CYAN}│${NC}\n" "VMID"          "$VMID"
+        printf "  ${CYAN}│${NC}  %-20s ${CYAN}│${NC}  %-24s ${CYAN}│${NC}\n" "Hostname"       "$HOSTNAME"
+        printf "  ${CYAN}│${NC}  %-20s ${CYAN}│${NC}  %-24s ${CYAN}│${NC}\n" "Password CT"    "$pass_mask"
+        echo -e "  ${CYAN}│──────────────────────│──────────────────────────│${NC}"
+        printf "  ${CYAN}│${NC}  %-20s ${CYAN}│${NC}  %-24s ${CYAN}│${NC}\n" "Disk"           "${DISK} GB"
+        printf "  ${CYAN}│${NC}  %-20s ${CYAN}│${NC}  %-24s ${CYAN}│${NC}\n" "CPU"            "${CPU} core"
+        printf "  ${CYAN}│${NC}  %-20s ${CYAN}│${NC}  %-24s ${CYAN}│${NC}\n" "Memory"         "${MEMORY} MB"
+        printf "  ${CYAN}│${NC}  %-20s ${CYAN}│${NC}  %-24s ${CYAN}│${NC}\n" "Swap"           "${SWAP} MB"
+        echo -e "  ${CYAN}│──────────────────────│──────────────────────────│${NC}"
+        printf "  ${CYAN}│${NC}  %-20s ${CYAN}│${NC}  %-24s ${CYAN}│${NC}\n" "IP Address"     "$IP"
+        printf "  ${CYAN}│${NC}  %-20s ${CYAN}│${NC}  %-24s ${CYAN}│${NC}\n" "Gateway"        "$GW"
+        echo -e "  ${CYAN}│──────────────────────│──────────────────────────│${NC}"
+        printf "  ${CYAN}│${NC}  %-20s ${CYAN}│${NC}  %-24s ${CYAN}│${NC}\n" "DB Name"        "$DB_NAME"
+        printf "  ${CYAN}│${NC}  %-20s ${CYAN}│${NC}  %-24s ${CYAN}│${NC}\n" "DB User"        "$DB_USER"
+        printf "  ${CYAN}│${NC}  %-20s ${CYAN}│${NC}  %-24s ${CYAN}│${NC}\n" "DB Password"    "$dbpass_mask"
+        echo -e "  ${CYAN}│──────────────────────│──────────────────────────│${NC}"
+        printf "  ${CYAN}│${NC}  %-20s ${CYAN}│${NC}  ${GREEN}%-24s${NC} ${CYAN}│${NC}\n" "URL WordPress"  "http://${ip_clean}"
+        echo -e "  ${CYAN}${BOLD}└──────────────────────┴──────────────────────────┘${NC}"
+    else
+        echo -e "  ${CYAN}${BOLD}+----------------------+---------------------------+${NC}"
+        echo -e "  ${CYAN}${BOLD}|  RINGKASAN           |  KONFIGURASI              |${NC}"
+        echo -e "  ${CYAN}${BOLD}+----------------------+---------------------------+${NC}"
+        printf "  ${CYAN}|${NC}  %-20s ${CYAN}|${NC}  %-25s ${CYAN}|${NC}\n" "VMID"          "$VMID"
+        printf "  ${CYAN}|${NC}  %-20s ${CYAN}|${NC}  %-25s ${CYAN}|${NC}\n" "Hostname"       "$HOSTNAME"
+        printf "  ${CYAN}|${NC}  %-20s ${CYAN}|${NC}  %-25s ${CYAN}|${NC}\n" "Password CT"    "$pass_mask"
+        echo -e "  ${CYAN}+----------------------+---------------------------+${NC}"
+        printf "  ${CYAN}|${NC}  %-20s ${CYAN}|${NC}  %-25s ${CYAN}|${NC}\n" "Disk"           "${DISK} GB"
+        printf "  ${CYAN}|${NC}  %-20s ${CYAN}|${NC}  %-25s ${CYAN}|${NC}\n" "CPU"            "${CPU} core"
+        printf "  ${CYAN}|${NC}  %-20s ${CYAN}|${NC}  %-25s ${CYAN}|${NC}\n" "Memory"         "${MEMORY} MB"
+        printf "  ${CYAN}|${NC}  %-20s ${CYAN}|${NC}  %-25s ${CYAN}|${NC}\n" "Swap"           "${SWAP} MB"
+        echo -e "  ${CYAN}+----------------------+---------------------------+${NC}"
+        printf "  ${CYAN}|${NC}  %-20s ${CYAN}|${NC}  %-25s ${CYAN}|${NC}\n" "IP Address"     "$IP"
+        printf "  ${CYAN}|${NC}  %-20s ${CYAN}|${NC}  %-25s ${CYAN}|${NC}\n" "Gateway"        "$GW"
+        echo -e "  ${CYAN}+----------------------+---------------------------+${NC}"
+        printf "  ${CYAN}|${NC}  %-20s ${CYAN}|${NC}  %-25s ${CYAN}|${NC}\n" "DB Name"        "$DB_NAME"
+        printf "  ${CYAN}|${NC}  %-20s ${CYAN}|${NC}  %-25s ${CYAN}|${NC}\n" "DB User"        "$DB_USER"
+        printf "  ${CYAN}|${NC}  %-20s ${CYAN}|${NC}  %-25s ${CYAN}|${NC}\n" "DB Password"    "$dbpass_mask"
+        echo -e "  ${CYAN}+----------------------+---------------------------+${NC}"
+        printf "  ${CYAN}|${NC}  %-20s ${CYAN}|${NC}  ${GREEN}%-25s${NC} ${CYAN}|${NC}\n" "URL WordPress"  "http://${ip_clean}"
+        echo -e "  ${CYAN}${BOLD}+----------------------+---------------------------+${NC}"
+    fi
     echo ""
 }
 
 # ─── KONFIRMASI ──────────────────────────────────────────────
 confirm_proceed() {
     while true; do
-        read -p "  ➜ Lanjutkan instalasi? (y/n): " answer
+        read -rp "  => Lanjutkan instalasi? (y/n): " answer
         case "$answer" in
-            y|Y|yes|YES) return 0 ;;
-            n|N|no|NO)
+            y|Y|yes) return 0 ;;
+            n|N|no)
                 warn "Instalasi dibatalkan."
                 exit 0
                 ;;
-            *) echo -e "  ${RED}  Ketik y untuk lanjut atau n untuk batal.${NC}" ;;
+            *) echo -e "  ${RED}  Ketik y atau n.${NC}" ;;
         esac
     done
+}
+
+# ─── DRY RUN PREVIEW ─────────────────────────────────────────
+show_dry_run() {
+    show_summary
+
+    section "Dry Run — Steps yang Akan Dijalankan"
+    echo ""
+    local steps=(
+        "[1/${TOTAL_STEPS}] Cek / download template"
+        "[2/${TOTAL_STEPS}] pct create ${VMID} (${HOSTNAME})"
+        "[3/${TOTAL_STEPS}] pct start ${VMID} + tunggu siap"
+        "[4/${TOTAL_STEPS}] apt-get update && apt-get upgrade"
+        "[5/${TOTAL_STEPS}] Install apache2, mysql-server, php + extensions"
+        "[6/${TOTAL_STEPS}] Setup database MySQL: ${DB_NAME} / ${DB_USER}"
+        "[7/${TOTAL_STEPS}] Download WordPress + konfigurasi wp-config.php"
+        "[8/${TOTAL_STEPS}] Konfigurasi Apache + aktifkan mod_rewrite"
+    )
+    for step in "${steps[@]}"; do
+        echo -e "  ${DIM}o${NC}  ${step}"
+    done
+
+    echo ""
+    echo -e "  ${BLUE}[i]${NC} Mode dry-run: tidak ada yang dieksekusi."
+    echo -e "  ${BLUE}[i]${NC} Jalankan tanpa --dry-run untuk eksekusi nyata."
+    echo ""
+    exit 0
 }
 
 # ─── MODE: QUICK INSTALL ─────────────────────────────────────
 quick_install() {
     section "Quick Install"
     echo ""
-    info "Disk/CPU/Memory/Swap & DB menggunakan nilai default"
-    info "Hanya perlu isi: VMID, Hostname, Password CT, dan IP"
+    info "Disk / CPU / Memory / Swap & DB menggunakan nilai default"
+    info "Hanya perlu isi: VMID, Hostname, Password, IP"
     echo ""
 
     get_input "VMID" "$DEFAULT_VMID" "validate_vmid"
@@ -218,9 +501,8 @@ quick_install() {
     IP="$INPUT_RESULT"
 
     GW=$(derive_gateway "$IP")
-    info "Gateway otomatis diset ke: $GW"
+    info "Gateway otomatis: ${GW}"
 
-    # Semua nilai lain pakai default
     DISK=$DEFAULT_DISK
     CPU=$DEFAULT_CPU
     MEMORY=$DEFAULT_MEMORY
@@ -235,7 +517,6 @@ custom_install() {
     section "Custom Install"
     echo ""
 
-    # ── Identitas CT
     info "[ Identitas Container ]"
     get_input "VMID" "$DEFAULT_VMID" "validate_vmid"
     VMID="$INPUT_RESULT"
@@ -246,9 +527,8 @@ custom_install() {
     get_input "Password CT" "$DEFAULT_PASSWORD" "" "yes"
     PASSWORD="$INPUT_RESULT"
 
-    # ── Spesifikasi (skippable)
     echo ""
-    info "[ Spesifikasi ] Tekan Enter untuk pakai nilai default"
+    info "[ Spesifikasi ] Tekan Enter untuk nilai default"
 
     get_input "Disk (GB)" "$DEFAULT_DISK" "validate_number"
     DISK="$INPUT_RESULT"
@@ -262,7 +542,6 @@ custom_install() {
     get_input "Swap (MB)" "$DEFAULT_SWAP" "validate_number"
     SWAP="$INPUT_RESULT"
 
-    # ── Jaringan
     echo ""
     info "[ Jaringan ]"
 
@@ -274,9 +553,8 @@ custom_install() {
     get_input "Gateway" "$suggested_gw" "validate_ip"
     GW="$INPUT_RESULT"
 
-    # ── Database WordPress
     echo ""
-    info "[ Database WordPress ] Tekan Enter untuk pakai nilai default"
+    info "[ Database WordPress ] Tekan Enter untuk nilai default"
 
     get_input "DB Name" "$DEFAULT_DB_NAME"
     DB_NAME="$INPUT_RESULT"
@@ -288,148 +566,128 @@ custom_install() {
     DB_PASS="$INPUT_RESULT"
 }
 
-# ─── PROSES INSTALASI ────────────────────────────────────────
+# ─── INSTALASI ───────────────────────────────────────────────
 run_install() {
-    section "Memulai Proses Instalasi"
+    [ "$EUID" -ne 0 ] && error "Script harus dijalankan sebagai root"
+
+    section "Memulai Instalasi"
+    INSTALL_START=$(date +%s)
     echo ""
 
-    # Root check
-    [ "$EUID" -ne 0 ] && error "Script harus dijalankan sebagai root di Proxmox host"
+    # Step 1: Template
+    run_step "Cek / download template" "check_template"
 
-    # Cek / download template
-    check_template
+    # Step 2: Buat CT
+    run_step "Membuat CT ${VMID} (${HOSTNAME})" \
+        "pct create ${VMID} \
+            ${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE} \
+            --hostname '${HOSTNAME}' \
+            --password '${PASSWORD}' \
+            --rootfs ${STORAGE}:${DISK} \
+            --cores ${CPU} \
+            --memory ${MEMORY} \
+            --swap ${SWAP} \
+            --net0 name=eth0,bridge=${BRIDGE},ip=${IP},gw=${GW} \
+            --unprivileged 1 \
+            --features nesting=1 \
+            --ostype ubuntu \
+            --start 0"
 
-    # Buat CT
-    log "Membuat CT $VMID ($HOSTNAME)..."
-    pct create $VMID \
-        $TEMPLATE_STORAGE:vztmpl/$TEMPLATE \
-        --hostname "$HOSTNAME" \
-        --password "$PASSWORD" \
-        --rootfs $STORAGE:$DISK \
-        --cores $CPU \
-        --memory $MEMORY \
-        --swap $SWAP \
-        --net0 name=eth0,bridge=$BRIDGE,ip=$IP,gw=$GW \
-        --unprivileged 1 \
-        --features nesting=1 \
-        --ostype ubuntu \
-        --start 0 || error "Gagal membuat CT"
+    # Step 3: Start CT
+    run_step "Menjalankan CT + tunggu siap" \
+        "pct start ${VMID} && sleep 15"
 
-    log "Menjalankan CT..."
-    pct start $VMID
+    # Step 4: Update & Upgrade
+    run_step "apt update && apt upgrade" \
+        "pct exec ${VMID} -- bash -c 'apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y'"
 
-    log "Menunggu CT siap (15 detik)..."
-    sleep 15
+    # Step 5: Install LAMP
+    run_step "Install LAMP stack (Apache, MySQL, PHP)" \
+        "pct exec ${VMID} -- bash -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            apache2 mysql-server php php-mysql php-curl php-gd \
+            php-mbstring php-xml php-zip libapache2-mod-php'"
 
-    # Update & Upgrade
-    section "apt update & upgrade"
-    pct exec $VMID -- bash -c "apt-get update -y" \
-        || error "apt-get update gagal"
-    pct exec $VMID -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y" \
-        || error "apt-get upgrade gagal"
-    log "Update & upgrade selesai"
+    # Step 6: Setup Database
+    run_step "Setup database MySQL" \
+        "pct exec ${VMID} -- bash -c \"mysql -e \\\"CREATE DATABASE ${DB_NAME} DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\\\"\" && \
+         pct exec ${VMID} -- bash -c \"mysql -e \\\"CREATE USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';\\\"\" && \
+         pct exec ${VMID} -- bash -c \"mysql -e \\\"GRANT ALL ON ${DB_NAME}.* TO '${DB_USER}'@'localhost'; FLUSH PRIVILEGES;\\\"\""
 
-    # Install LAMP
-    section "Install LAMP Stack"
-    pct exec $VMID -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        apache2 \
-        mysql-server \
-        php \
-        php-mysql \
-        php-curl \
-        php-gd \
-        php-mbstring \
-        php-xml \
-        php-zip \
-        libapache2-mod-php" || error "Instalasi LAMP gagal"
-    log "Apache, MySQL, PHP berhasil diinstall"
+    # Step 7: WordPress
+    run_step "Download & install WordPress" \
+        "pct exec ${VMID} -- bash -c '
+            cd /tmp && wget -q https://wordpress.org/latest.tar.gz && tar -xzf latest.tar.gz &&
+            mv wordpress /var/www/html/ &&
+            chown -R www-data:www-data /var/www/html/wordpress &&
+            chmod -R 755 /var/www/html/wordpress &&
+            cd /var/www/html/wordpress &&
+            cp wp-config-sample.php wp-config.php &&
+            sed -i \"s|database_name_here|${DB_NAME}|\" wp-config.php &&
+            sed -i \"s|username_here|${DB_USER}|\" wp-config.php &&
+            sed -i \"s|password_here|${DB_PASS}|\" wp-config.php'"
 
-    # Setup Database
-    section "Setup Database MySQL"
-    pct exec $VMID -- bash -c "mysql -e \"CREATE DATABASE $DB_NAME DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\"" \
-        || error "Gagal membuat database '$DB_NAME'"
-    pct exec $VMID -- bash -c "mysql -e \"CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';\"" \
-        || error "Gagal membuat user '$DB_USER'"
-    pct exec $VMID -- bash -c "mysql -e \"GRANT ALL ON $DB_NAME.* TO '$DB_USER'@'localhost'; FLUSH PRIVILEGES;\"" \
-        || error "Gagal set privileges"
-    log "Database '$DB_NAME' dan user '$DB_USER' berhasil dibuat"
-
-    # Download WordPress
-    section "Download & Install WordPress"
-    pct exec $VMID -- bash -c "
-        cd /tmp && \
-        wget -q https://wordpress.org/latest.tar.gz && \
-        tar -xzf latest.tar.gz && \
-        mv wordpress /var/www/html/ && \
-        chown -R www-data:www-data /var/www/html/wordpress && \
-        chmod -R 755 /var/www/html/wordpress" || error "Download WordPress gagal"
-    log "WordPress berhasil diunduh dan dipasang"
-
-    # wp-config.php
-    section "Konfigurasi wp-config.php"
-    pct exec $VMID -- bash -c "
-        cd /var/www/html/wordpress && \
-        cp wp-config-sample.php wp-config.php && \
-        sed -i 's|database_name_here|$DB_NAME|' wp-config.php && \
-        sed -i 's|username_here|$DB_USER|' wp-config.php && \
-        sed -i 's|password_here|$DB_PASS|' wp-config.php" || error "Konfigurasi wp-config gagal"
-    log "wp-config.php dikonfigurasi"
-
-    # Apache config
-    section "Konfigurasi Apache"
-    pct exec $VMID -- bash -c "cat > /etc/apache2/sites-available/000-default.conf << 'APACHEEOF'
+    # Step 8: Apache
+    run_step "Konfigurasi Apache + mod_rewrite" \
+        "pct exec ${VMID} -- bash -c 'cat > /etc/apache2/sites-available/000-default.conf << APACHEEOF
 <VirtualHost *:80>
     ServerAdmin webmaster@localhost
     DocumentRoot /var/www/html/wordpress
-
     <Directory /var/www/html/wordpress>
         Options FollowSymLinks
         AllowOverride All
         Require all granted
     </Directory>
-
-    ErrorLog \${APACHE_LOG_DIR}/error.log
-    CustomLog \${APACHE_LOG_DIR}/access.log combined
+    ErrorLog \\\${APACHE_LOG_DIR}/error.log
+    CustomLog \\\${APACHE_LOG_DIR}/access.log combined
 </VirtualHost>
 APACHEEOF
-    a2enmod rewrite && systemctl restart apache2" || error "Konfigurasi Apache gagal"
-    log "Apache dikonfigurasi dan direstart"
+        a2enmod rewrite && systemctl restart apache2'"
 
     # Selesai
+    local total_elapsed
+    total_elapsed=$(format_time $(( $(date +%s) - INSTALL_START )))
     local ip_clean="${IP%/*}"
+
     echo ""
-    echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}${BOLD}   ✓  INSTALASI SELESAI!                          ${NC}"
-    echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════${NC}"
+    if $FANCY; then
+        echo -e "${GREEN}${BOLD}  ╔═══════════════════════════════════════════════╗${NC}"
+        echo -e "${GREEN}${BOLD}  ║   [+]  INSTALASI SELESAI!                    ║${NC}"
+        echo -e "${GREEN}${BOLD}  ╚═══════════════════════════════════════════════╝${NC}"
+    else
+        echo -e "${GREEN}${BOLD}  +------------------------------------------------+${NC}"
+        echo -e "${GREEN}${BOLD}  |   [+]  INSTALASI SELESAI!                     |${NC}"
+        echo -e "${GREEN}${BOLD}  +------------------------------------------------+${NC}"
+    fi
     echo ""
-    echo -e "  ${BOLD}CT ID     :${NC} $VMID"
-    echo -e "  ${BOLD}Hostname  :${NC} $HOSTNAME"
-    echo -e "  ${BOLD}IP        :${NC} $ip_clean"
+    echo -e "  ${BOLD}CT ID       :${NC} ${VMID}"
+    echo -e "  ${BOLD}Hostname    :${NC} ${HOSTNAME}"
+    echo -e "  ${BOLD}IP Address  :${NC} ${ip_clean}"
+    echo -e "  ${BOLD}Total waktu :${NC} ${total_elapsed}"
     echo ""
     echo -e "  Buka browser dan akses:"
-    echo -e "  ${CYAN}${BOLD}http://$ip_clean${NC}"
+    echo -e "  ${CYAN}${BOLD}  http://${ip_clean}${NC}"
     echo ""
-    echo -e "  Selesaikan wizard WordPress di browser"
-    echo -e "  untuk setup nama situs dan akun admin."
-    echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════${NC}"
+    echo -e "  ${DIM}Log lengkap: ${LOG_FILE}${NC}"
     echo ""
 }
 
 # ─── MAIN ────────────────────────────────────────────────────
 main() {
-    clear
-    echo ""
-    echo -e "${CYAN}${BOLD}══════════════════════════════════════════════════${NC}"
-    echo -e "${CYAN}${BOLD}   Proxmox CT Creator + WordPress Installer v2.0  ${NC}"
-    echo -e "${CYAN}${BOLD}══════════════════════════════════════════════════${NC}"
-    echo ""
-    echo -e "  ${BOLD}[1]${NC} Quick Install   — Setup cepat, minimal pertanyaan"
-    echo -e "  ${BOLD}[2]${NC} Custom Install  — Konfigurasi lengkap & fleksibel"
-    echo -e "  ${BOLD}[0]${NC} Exit"
+    show_banner
+
+    if $FANCY; then
+        echo -e "  ${BOLD}[1]${NC} Quick Install   ${DIM}─${NC} minimal input, langsung jalan"
+        echo -e "  ${BOLD}[2]${NC} Custom Install  ${DIM}─${NC} kontrol penuh semua konfigurasi"
+        echo -e "  ${BOLD}[0]${NC} Exit"
+    else
+        echo -e "  [1] Quick Install   -- minimal input, langsung jalan"
+        echo -e "  [2] Custom Install  -- kontrol penuh semua konfigurasi"
+        echo -e "  [0] Exit"
+    fi
     echo ""
 
     while true; do
-        read -p "  ➜ Pilih mode (0/1/2): " choice
+        read -rp "  => Pilih mode (0/1/2): " choice
         case "$choice" in
             1) quick_install; break ;;
             2) custom_install; break ;;
@@ -439,6 +697,7 @@ main() {
     done
 
     show_summary
+    $DRY_RUN && show_dry_run
     confirm_proceed
     run_install
 }
