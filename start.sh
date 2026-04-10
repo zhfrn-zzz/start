@@ -124,15 +124,13 @@ error() {
 
 section() {
     local title="$1"
-    local pad_len=$(( 46 - ${#title} ))
-    [ $pad_len -lt 0 ] && pad_len=0
-    local pad
+    echo ""
     if $FANCY; then
-        pad=$(printf '─%.0s' $(seq 1 $pad_len))
-        echo -e "\n${CYAN}${BOLD}  ─── ${title} ${pad}${NC}"
+        echo -e "  ${CYAN}${BOLD}▐ ${title}${NC}"
+        echo -e "  ${DIM}$(printf '━%.0s' $(seq 1 50))${NC}"
     else
-        pad=$(printf -- '-%.0s' $(seq 1 $pad_len))
-        echo -e "\n${CYAN}${BOLD}  --- ${title} ${pad}${NC}"
+        echo -e "  ${CYAN}${BOLD}> ${title}${NC}"
+        echo -e "  ${DIM}$(printf -- '-%.0s' $(seq 1 50))${NC}"
     fi
 }
 
@@ -142,19 +140,29 @@ run_step() {
     local label="$1"
     local cmd="$2"
     CURRENT_STEP=$((CURRENT_STEP + 1))
-    local prefix="[${CURRENT_STEP}/${TOTAL_STEPS}]"
+    local prefix="${CURRENT_STEP}/${TOTAL_STEPS}"
     local step_start
     step_start=$(date +%s)
 
     echo "" >> "$LOG_FILE"
-    echo "=== ${prefix} ${label} ===" >> "$LOG_FILE"
+    echo "=== [${prefix}] ${label} ===" >> "$LOG_FILE"
+
+    # Progress bar
+    local filled=$(( CURRENT_STEP * 20 / TOTAL_STEPS ))
+    local empty=$(( 20 - filled ))
+    local bar=""
+    if $FANCY; then
+        bar=$(printf '█%.0s' $(seq 1 $filled))$(printf '░%.0s' $(seq 1 $empty))
+    else
+        bar=$(printf '#%.0s' $(seq 1 $filled))$(printf '.%.0s' $(seq 1 $empty))
+    fi
 
     if $VERBOSE; then
-        echo -e "  ${CYAN}${prefix}${NC} ${label}"
+        echo -e "  ${DIM}[${bar}]${NC} ${CYAN}${prefix}${NC}  ${label}"
         eval "$cmd" 2>&1 | tee -a "$LOG_FILE"
         local exit_code="${PIPESTATUS[0]}"
     else
-        start_spinner "${prefix} ${label}"
+        start_spinner "[${bar}] ${prefix}  ${label}"
         eval "$cmd" >> "$LOG_FILE" 2>&1
         local exit_code=$?
         stop_spinner
@@ -164,10 +172,18 @@ run_step() {
     elapsed=$(format_time $(( $(date +%s) - step_start )))
 
     if [ "$exit_code" -eq 0 ]; then
-        echo -e "  ${GREEN}[+]${NC} ${prefix} ${label} ${DIM}(${elapsed})${NC}"
+        if $FANCY; then
+            echo -e "  ${GREEN}✓${NC} ${DIM}[${bar}]${NC} ${prefix}  ${label}  ${DIM}${elapsed}${NC}"
+        else
+            echo -e "  ${GREEN}[OK]${NC} ${DIM}[${bar}]${NC} ${prefix}  ${label}  ${DIM}${elapsed}${NC}"
+        fi
         echo "[OK] Step selesai dalam ${elapsed}" >> "$LOG_FILE"
     else
-        echo -e "  ${RED}[x]${NC} ${prefix} ${label} ${DIM}(${elapsed})${NC}"
+        if $FANCY; then
+            echo -e "  ${RED}✗${NC} ${DIM}[${bar}]${NC} ${prefix}  ${label}  ${DIM}${elapsed}${NC}"
+        else
+            echo -e "  ${RED}[FAIL]${NC} ${DIM}[${bar}]${NC} ${prefix}  ${label}  ${DIM}${elapsed}${NC}"
+        fi
         handle_error "$label" "$cmd"
     fi
 }
@@ -178,22 +194,34 @@ handle_error() {
     local cmd="$2"
 
     echo ""
-    echo -e "  ${RED}${BOLD}Gagal:${NC} ${label}"
-    echo -e "  ${DIM}Log tersimpan di: ${LOG_FILE}${NC}"
+    if $FANCY; then
+        echo -e "  ${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  ${RED}${BOLD}  ✗ Step Failed${NC}  ${label}"
+        echo -e "  ${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    else
+        echo -e "  ${RED}==================================================${NC}"
+        echo -e "  ${RED}${BOLD}  [FAILED]${NC}  ${label}"
+        echo -e "  ${RED}==================================================${NC}"
+    fi
+    echo -e "  ${DIM}Log: ${LOG_FILE}${NC}"
     echo ""
 
     while true; do
         if $FANCY; then
-            echo -e "  ${BOLD}Pilih tindakan:${NC}"
-            echo -e "  ${CYAN}[r]${NC} Retry  — ulangi step ini"
-            echo -e "  ${CYAN}[s]${NC} Skip   — lewati, lanjut step berikutnya"
-            echo -e "  ${CYAN}[l]${NC} Log    — tampilkan 30 baris log terakhir"
-            echo -e "  ${CYAN}[a]${NC} Abort  — hentikan instalasi"
+            echo -e "  ${BOLD}Recovery Options:${NC}"
+            echo -e "    ${CYAN}r${NC} │ Retry this step"
+            echo -e "    ${CYAN}s${NC} │ Skip and continue"
+            echo -e "    ${CYAN}l${NC} │ Show last 30 log lines"
+            echo -e "    ${CYAN}a${NC} │ Abort installation"
         else
-            echo -e "  Pilih: [r] Retry  [s] Skip  [l] Log  [a] Abort"
+            echo -e "  ${BOLD}Recovery Options:${NC}"
+            echo -e "    ${CYAN}r${NC} | Retry this step"
+            echo -e "    ${CYAN}s${NC} | Skip and continue"
+            echo -e "    ${CYAN}l${NC} | Show last 30 log lines"
+            echo -e "    ${CYAN}a${NC} | Abort installation"
         fi
         echo ""
-        read -rp "  => Pilihan (r/s/l/a): " choice
+        read -rp "  => Choice (r/s/l/a): " choice
 
         case "$choice" in
             r|R)
@@ -203,7 +231,7 @@ handle_error() {
                     eval "$cmd" 2>&1 | tee -a "$LOG_FILE"
                     local ec="${PIPESTATUS[0]}"
                 else
-                    start_spinner "Retry: ${label}"
+                    start_spinner "Retrying: ${label}"
                     eval "$cmd" >> "$LOG_FILE" 2>&1
                     local ec=$?
                     stop_spinner
@@ -211,29 +239,33 @@ handle_error() {
                 local elapsed
                 elapsed=$(format_time $(( $(date +%s) - t_start )))
                 if [ "$ec" -eq 0 ]; then
-                    echo -e "  ${GREEN}[+]${NC} Retry berhasil! ${DIM}(${elapsed})${NC}"
+                    if $FANCY; then
+                        echo -e "  ${GREEN}✓${NC} Retry succeeded  ${DIM}${elapsed}${NC}"
+                    else
+                        echo -e "  ${GREEN}[OK]${NC} Retry succeeded  ${DIM}${elapsed}${NC}"
+                    fi
                     return 0
                 else
-                    echo -e "  ${RED}[x]${NC} Retry gagal lagi."
+                    echo -e "  ${RED}[x]${NC} Retry failed."
                 fi
                 ;;
             s|S)
-                warn "Step dilewati: ${label}"
+                warn "Step skipped: ${label}"
                 return 0
                 ;;
             l|L)
                 echo ""
-                echo -e "  ${DIM}--- 30 baris terakhir log ---${NC}"
-                tail -30 "$LOG_FILE" | sed 's/^/  /'
-                echo -e "  ${DIM}--- end ---${NC}"
+                echo -e "  ${DIM}─── last 30 lines ───${NC}"
+                tail -30 "$LOG_FILE" | sed 's/^/    /'
+                echo -e "  ${DIM}─── end ───${NC}"
                 echo ""
                 ;;
             a|A)
                 echo ""
-                error "Instalasi dihentikan oleh user."
+                error "Installation aborted by user."
                 ;;
             *)
-                echo -e "  ${RED}  Ketik r, s, l, atau a.${NC}"
+                echo -e "  ${RED}Invalid choice.${NC} Enter r, s, l, or a."
                 ;;
         esac
     done
@@ -242,44 +274,43 @@ handle_error() {
 # ─── BANNER ──────────────────────────────────────────────────
 show_banner() {
     clear
+    echo ""
     if $FANCY; then
-        echo -e "${CYAN}${BOLD}"
+        echo -e "${CYAN}"
         cat << 'BANNER'
-  ╔═══════════════════════════════════════════════════╗
-  ║  __    __ ____       ____ ______ __  _  _  ____  ║
-  ║  \ \  / /|  _ \     / ___|__  __| | | || ||  _ \ ║
-  ║   \ \/ / | |_) |   | |     | |  | |_| || || |_) |║
-  ║    )  (  |  __/    | |     | |  |  _  ||_||  __/ ║
-  ║   / /\ \ | |       | |___  | |  | | | |   | |    ║
-  ║  /_/  \_\|_|        \____| |_|  |_| |_|   |_|    ║
-  ╚═══════════════════════════════════════════════════╝
+    ██╗  ██╗██████╗      ██████╗████████╗██╗██████╗
+    ╚██╗██╔╝██╔══██╗    ██╔════╝╚══██╔══╝██║██╔══██╗
+     ╚███╔╝ ██████╔╝    ██║        ██║   ██║██████╔╝
+     ██╔██╗ ██╔═══╝     ██║        ██║   ██║██╔═══╝
+    ██╔╝ ██╗██║         ╚██████╗   ██║   ██║██║
+    ╚═╝  ╚═╝╚═╝          ╚═════╝   ╚═╝   ╚═╝╚═╝
 BANNER
         echo -e "${NC}"
+        echo -e "  ${BOLD}Proxmox Container + WordPress Installer${NC}  ${DIM}v3.0${NC}"
+        echo -e "  ${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     else
         echo -e "${CYAN}${BOLD}"
         cat << 'BANNER'
-  +---------------------------------------------------+
-  |  __    __ ____       ____ ______ __  _  _  ____  |
-  |  \ \  / /|  _ \     / ___|__  __| | | || ||  _ \ |
-  |   \ \/ / | |_) |   | |     | |  | |_| || || |_) ||
-  |    )  (  |  __/    | |     | |  |  _  ||_||  __/ |
-  |   / /\ \ | |       | |___  | |  | | | |   | |    |
-  |  /_/  \_\|_|        \____| |_|  |_| |_|   |_|    |
-  +---------------------------------------------------+
+    __  ______     ________________
+    \ \/ / __ \   / ____/_  __/  _/ __ \
+     \  / /_/ /  / /     / /  / // /_/ /
+     / / ____/  / /___  / / _/ // ____/
+    /_/_/        \____/ /_/ /___/_/
 BANNER
         echo -e "${NC}"
+        echo -e "  ${BOLD}Proxmox Container + WordPress Installer${NC}  ${DIM}v3.0${NC}"
+        echo -e "  ${DIM}--------------------------------------------------${NC}"
     fi
 
-    echo -e "  ${BOLD}Proxmox Container + WordPress Installer${NC}  ${DIM}v3.0${NC}"
     echo ""
-
     local flags=""
-    $VERBOSE && flags+=" ${YELLOW}[--verbose]${NC}"
-    $FANCY   && flags+=" ${CYAN}[--fancy]${NC}"
-    $DRY_RUN && flags+=" ${BLUE}[--dry-run]${NC}"
-    [ -n "$flags" ] && echo -e " ${flags}" && echo ""
+    $VERBOSE && flags+=" ${YELLOW}[verbose]${NC}"
+    $FANCY   && flags+=" ${CYAN}[fancy]${NC}"
+    $DRY_RUN && flags+=" ${BLUE}[dry-run]${NC}"
+    [ -n "$flags" ] && echo -e "  ${DIM}Flags:${NC}${flags}" && echo ""
 
-    echo -e "  ${DIM}Log: ${LOG_FILE}${NC}"
+    echo -e "  ${DIM}Log:${NC} ${LOG_FILE}"
+    echo ""
 }
 
 # ─── INPUT HELPER ────────────────────────────────────────────
@@ -389,51 +420,73 @@ show_summary() {
     local dbpass_mask
     dbpass_mask=$(printf '%s' "$DB_PASS" | sed 's/./*/g')
 
+    # Helper: print a row with proper alignment (ANSI-safe)
+    _row() {
+        local key="$1" val="$2" val_color="${3:-}"
+        if $FANCY; then
+            printf "  ${CYAN}│${NC} %-18s ${CYAN}│${NC} " "$key"
+            if [ -n "$val_color" ]; then
+                printf "${val_color}%-24s${NC}" "$val"
+            else
+                printf "%-24s" "$val"
+            fi
+            printf " ${CYAN}│${NC}\n"
+        else
+            printf "  ${CYAN}|${NC} %-18s ${CYAN}|${NC} " "$key"
+            if [ -n "$val_color" ]; then
+                printf "${val_color}%-24s${NC}" "$val"
+            else
+                printf "%-24s" "$val"
+            fi
+            printf " ${CYAN}|${NC}\n"
+        fi
+    }
+
     echo ""
     if $FANCY; then
-        echo -e "  ${CYAN}${BOLD}┌──────────────────────┬──────────────────────────┐${NC}"
-        echo -e "  ${CYAN}${BOLD}│  RINGKASAN           │  KONFIGURASI             │${NC}"
-        echo -e "  ${CYAN}${BOLD}├──────────────────────┼──────────────────────────┤${NC}"
-        printf "  ${CYAN}│${NC}  %-20s ${CYAN}│${NC}  %-24s ${CYAN}│${NC}\n" "VMID"          "$VMID"
-        printf "  ${CYAN}│${NC}  %-20s ${CYAN}│${NC}  %-24s ${CYAN}│${NC}\n" "Hostname"       "$HOSTNAME"
-        printf "  ${CYAN}│${NC}  %-20s ${CYAN}│${NC}  %-24s ${CYAN}│${NC}\n" "Password CT"    "$pass_mask"
-        echo -e "  ${CYAN}│──────────────────────│──────────────────────────│${NC}"
-        printf "  ${CYAN}│${NC}  %-20s ${CYAN}│${NC}  %-24s ${CYAN}│${NC}\n" "Disk"           "${DISK} GB"
-        printf "  ${CYAN}│${NC}  %-20s ${CYAN}│${NC}  %-24s ${CYAN}│${NC}\n" "CPU"            "${CPU} core"
-        printf "  ${CYAN}│${NC}  %-20s ${CYAN}│${NC}  %-24s ${CYAN}│${NC}\n" "Memory"         "${MEMORY} MB"
-        printf "  ${CYAN}│${NC}  %-20s ${CYAN}│${NC}  %-24s ${CYAN}│${NC}\n" "Swap"           "${SWAP} MB"
-        echo -e "  ${CYAN}│──────────────────────│──────────────────────────│${NC}"
-        printf "  ${CYAN}│${NC}  %-20s ${CYAN}│${NC}  %-24s ${CYAN}│${NC}\n" "IP Address"     "$IP"
-        printf "  ${CYAN}│${NC}  %-20s ${CYAN}│${NC}  %-24s ${CYAN}│${NC}\n" "Gateway"        "$GW"
-        echo -e "  ${CYAN}│──────────────────────│──────────────────────────│${NC}"
-        printf "  ${CYAN}│${NC}  %-20s ${CYAN}│${NC}  %-24s ${CYAN}│${NC}\n" "DB Name"        "$DB_NAME"
-        printf "  ${CYAN}│${NC}  %-20s ${CYAN}│${NC}  %-24s ${CYAN}│${NC}\n" "DB User"        "$DB_USER"
-        printf "  ${CYAN}│${NC}  %-20s ${CYAN}│${NC}  %-24s ${CYAN}│${NC}\n" "DB Password"    "$dbpass_mask"
-        echo -e "  ${CYAN}│──────────────────────│──────────────────────────│${NC}"
-        printf "  ${CYAN}│${NC}  %-20s ${CYAN}│${NC}  ${GREEN}%-24s${NC} ${CYAN}│${NC}\n" "URL WordPress"  "http://${ip_clean}"
-        echo -e "  ${CYAN}${BOLD}└──────────────────────┴──────────────────────────┘${NC}"
+        echo -e "  ${CYAN}┌────────────────────┬──────────────────────────┐${NC}"
+        echo -e "  ${CYAN}│${NC} ${BOLD}Parameter${NC}          ${CYAN}│${NC} ${BOLD}Value${NC}                    ${CYAN}│${NC}"
+        echo -e "  ${CYAN}├────────────────────┼──────────────────────────┤${NC}"
+        _row "VMID"         "$VMID"
+        _row "Hostname"     "$HOSTNAME"
+        _row "Password CT"  "$pass_mask"
+        echo -e "  ${CYAN}├────────────────────┼──────────────────────────┤${NC}"
+        _row "Disk"         "${DISK} GB"
+        _row "CPU"          "${CPU} core"
+        _row "Memory"       "${MEMORY} MB"
+        _row "Swap"         "${SWAP} MB"
+        echo -e "  ${CYAN}├────────────────────┼──────────────────────────┤${NC}"
+        _row "IP Address"   "$IP"
+        _row "Gateway"      "$GW"
+        echo -e "  ${CYAN}├────────────────────┼──────────────────────────┤${NC}"
+        _row "DB Name"      "$DB_NAME"
+        _row "DB User"      "$DB_USER"
+        _row "DB Password"  "$dbpass_mask"
+        echo -e "  ${CYAN}├────────────────────┼──────────────────────────┤${NC}"
+        _row "WordPress URL" "http://${ip_clean}" "$GREEN"
+        echo -e "  ${CYAN}└────────────────────┴──────────────────────────┘${NC}"
     else
-        echo -e "  ${CYAN}${BOLD}+----------------------+---------------------------+${NC}"
-        echo -e "  ${CYAN}${BOLD}|  RINGKASAN           |  KONFIGURASI              |${NC}"
-        echo -e "  ${CYAN}${BOLD}+----------------------+---------------------------+${NC}"
-        printf "  ${CYAN}|${NC}  %-20s ${CYAN}|${NC}  %-25s ${CYAN}|${NC}\n" "VMID"          "$VMID"
-        printf "  ${CYAN}|${NC}  %-20s ${CYAN}|${NC}  %-25s ${CYAN}|${NC}\n" "Hostname"       "$HOSTNAME"
-        printf "  ${CYAN}|${NC}  %-20s ${CYAN}|${NC}  %-25s ${CYAN}|${NC}\n" "Password CT"    "$pass_mask"
-        echo -e "  ${CYAN}+----------------------+---------------------------+${NC}"
-        printf "  ${CYAN}|${NC}  %-20s ${CYAN}|${NC}  %-25s ${CYAN}|${NC}\n" "Disk"           "${DISK} GB"
-        printf "  ${CYAN}|${NC}  %-20s ${CYAN}|${NC}  %-25s ${CYAN}|${NC}\n" "CPU"            "${CPU} core"
-        printf "  ${CYAN}|${NC}  %-20s ${CYAN}|${NC}  %-25s ${CYAN}|${NC}\n" "Memory"         "${MEMORY} MB"
-        printf "  ${CYAN}|${NC}  %-20s ${CYAN}|${NC}  %-25s ${CYAN}|${NC}\n" "Swap"           "${SWAP} MB"
-        echo -e "  ${CYAN}+----------------------+---------------------------+${NC}"
-        printf "  ${CYAN}|${NC}  %-20s ${CYAN}|${NC}  %-25s ${CYAN}|${NC}\n" "IP Address"     "$IP"
-        printf "  ${CYAN}|${NC}  %-20s ${CYAN}|${NC}  %-25s ${CYAN}|${NC}\n" "Gateway"        "$GW"
-        echo -e "  ${CYAN}+----------------------+---------------------------+${NC}"
-        printf "  ${CYAN}|${NC}  %-20s ${CYAN}|${NC}  %-25s ${CYAN}|${NC}\n" "DB Name"        "$DB_NAME"
-        printf "  ${CYAN}|${NC}  %-20s ${CYAN}|${NC}  %-25s ${CYAN}|${NC}\n" "DB User"        "$DB_USER"
-        printf "  ${CYAN}|${NC}  %-20s ${CYAN}|${NC}  %-25s ${CYAN}|${NC}\n" "DB Password"    "$dbpass_mask"
-        echo -e "  ${CYAN}+----------------------+---------------------------+${NC}"
-        printf "  ${CYAN}|${NC}  %-20s ${CYAN}|${NC}  ${GREEN}%-25s${NC} ${CYAN}|${NC}\n" "URL WordPress"  "http://${ip_clean}"
-        echo -e "  ${CYAN}${BOLD}+----------------------+---------------------------+${NC}"
+        echo -e "  ${CYAN}+--------------------+--------------------------+${NC}"
+        echo -e "  ${CYAN}|${NC} ${BOLD}Parameter${NC}          ${CYAN}|${NC} ${BOLD}Value${NC}                    ${CYAN}|${NC}"
+        echo -e "  ${CYAN}+--------------------+--------------------------+${NC}"
+        _row "VMID"         "$VMID"
+        _row "Hostname"     "$HOSTNAME"
+        _row "Password CT"  "$pass_mask"
+        echo -e "  ${CYAN}+--------------------+--------------------------+${NC}"
+        _row "Disk"         "${DISK} GB"
+        _row "CPU"          "${CPU} core"
+        _row "Memory"       "${MEMORY} MB"
+        _row "Swap"         "${SWAP} MB"
+        echo -e "  ${CYAN}+--------------------+--------------------------+${NC}"
+        _row "IP Address"   "$IP"
+        _row "Gateway"      "$GW"
+        echo -e "  ${CYAN}+--------------------+--------------------------+${NC}"
+        _row "DB Name"      "$DB_NAME"
+        _row "DB User"      "$DB_USER"
+        _row "DB Password"  "$dbpass_mask"
+        echo -e "  ${CYAN}+--------------------+--------------------------+${NC}"
+        _row "WordPress URL" "http://${ip_clean}" "$GREEN"
+        echo -e "  ${CYAN}+--------------------+--------------------------+${NC}"
     fi
     echo ""
 }
@@ -650,24 +703,35 @@ APACHEEOF
 
     echo ""
     if $FANCY; then
-        echo -e "${GREEN}${BOLD}  ╔═══════════════════════════════════════════════╗${NC}"
-        echo -e "${GREEN}${BOLD}  ║   [+]  INSTALASI SELESAI!                    ║${NC}"
-        echo -e "${GREEN}${BOLD}  ╚═══════════════════════════════════════════════╝${NC}"
+        echo -e "  ${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  ${GREEN}${BOLD}  ✓  INSTALLATION COMPLETE${NC}"
+        echo -e "  ${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     else
-        echo -e "${GREEN}${BOLD}  +------------------------------------------------+${NC}"
-        echo -e "${GREEN}${BOLD}  |   [+]  INSTALASI SELESAI!                     |${NC}"
-        echo -e "${GREEN}${BOLD}  +------------------------------------------------+${NC}"
+        echo -e "  ${GREEN}==================================================${NC}"
+        echo -e "  ${GREEN}${BOLD}  [OK]  INSTALLATION COMPLETE${NC}"
+        echo -e "  ${GREEN}==================================================${NC}"
     fi
     echo ""
-    echo -e "  ${BOLD}CT ID       :${NC} ${VMID}"
-    echo -e "  ${BOLD}Hostname    :${NC} ${HOSTNAME}"
-    echo -e "  ${BOLD}IP Address  :${NC} ${ip_clean}"
-    echo -e "  ${BOLD}Total waktu :${NC} ${total_elapsed}"
+    echo -e "  ${BOLD}CT ID${NC}         ${VMID}"
+    echo -e "  ${BOLD}Hostname${NC}      ${HOSTNAME}"
+    echo -e "  ${BOLD}IP Address${NC}    ${ip_clean}"
+    echo -e "  ${BOLD}Duration${NC}      ${total_elapsed}"
     echo ""
-    echo -e "  Buka browser dan akses:"
-    echo -e "  ${CYAN}${BOLD}  http://${ip_clean}${NC}"
+    if $FANCY; then
+        echo -e "  ${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    else
+        echo -e "  ${DIM}--------------------------------------------------${NC}"
+    fi
+    echo -e "  Open your browser:"
     echo ""
-    echo -e "  ${DIM}Log lengkap: ${LOG_FILE}${NC}"
+    echo -e "    ${CYAN}${BOLD}→  http://${ip_clean}${NC}"
+    echo ""
+    if $FANCY; then
+        echo -e "  ${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    else
+        echo -e "  ${DIM}--------------------------------------------------${NC}"
+    fi
+    echo -e "  ${DIM}Full log: ${LOG_FILE}${NC}"
     echo ""
 }
 
@@ -676,23 +740,27 @@ main() {
     show_banner
 
     if $FANCY; then
-        echo -e "  ${BOLD}[1]${NC} Quick Install   ${DIM}─${NC} minimal input, langsung jalan"
-        echo -e "  ${BOLD}[2]${NC} Custom Install  ${DIM}─${NC} kontrol penuh semua konfigurasi"
-        echo -e "  ${BOLD}[0]${NC} Exit"
+        echo -e "  ${BOLD}Select Installation Mode:${NC}"
+        echo ""
+        echo -e "    ${GREEN}${BOLD}1${NC}  │  Quick Install    ${DIM}─ minimal input, auto defaults${NC}"
+        echo -e "    ${BLUE}${BOLD}2${NC}  │  Custom Install   ${DIM}─ full control over config${NC}"
+        echo -e "    ${DIM}0${NC}  │  Exit"
     else
-        echo -e "  [1] Quick Install   -- minimal input, langsung jalan"
-        echo -e "  [2] Custom Install  -- kontrol penuh semua konfigurasi"
-        echo -e "  [0] Exit"
+        echo -e "  ${BOLD}Select Installation Mode:${NC}"
+        echo ""
+        echo -e "    ${GREEN}${BOLD}1${NC}  |  Quick Install    ${DIM}-- minimal input, auto defaults${NC}"
+        echo -e "    ${BLUE}${BOLD}2${NC}  |  Custom Install   ${DIM}-- full control over config${NC}"
+        echo -e "    ${DIM}0${NC}  |  Exit"
     fi
     echo ""
 
     while true; do
-        read -rp "  => Pilih mode (0/1/2): " choice
+        read -rp "  => Mode (0/1/2): " choice
         case "$choice" in
             1) quick_install; break ;;
             2) custom_install; break ;;
             0) echo ""; info "Exit."; exit 0 ;;
-            *) echo -e "  ${RED}  Pilihan tidak valid. Ketik 1, 2, atau 0.${NC}" ;;
+            *) echo -e "  ${RED}Invalid.${NC} Enter 1, 2, or 0." ;;
         esac
     done
 
