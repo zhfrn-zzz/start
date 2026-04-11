@@ -152,9 +152,11 @@ run_step() {
     local empty=$(( 20 - filled ))
     local bar=""
     if $FANCY; then
-        bar=$(printf '█%.0s' $(seq 1 $filled))$(printf '░%.0s' $(seq 1 $empty))
+        [ "$filled" -gt 0 ] && bar=$(printf '█%.0s' $(seq 1 $filled))
+        [ "$empty" -gt 0 ] && bar+=$(printf '░%.0s' $(seq 1 $empty))
     else
-        bar=$(printf '#%.0s' $(seq 1 $filled))$(printf '.%.0s' $(seq 1 $empty))
+        [ "$filled" -gt 0 ] && bar=$(printf '#%.0s' $(seq 1 $filled))
+        [ "$empty" -gt 0 ] && bar+=$(printf '.%.0s' $(seq 1 $empty))
     fi
 
     if $VERBOSE; then
