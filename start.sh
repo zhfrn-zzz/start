@@ -52,7 +52,7 @@ TEMPLATE="ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
 BRIDGE="vmbr0"
 
 # ─── STEP TRACKING ───────────────────────────────────────────
-TOTAL_STEPS=8
+TOTAL_STEPS=9
 CURRENT_STEP=0
 INSTALL_START=0
 
@@ -361,8 +361,8 @@ get_input() {
 # ─── VALIDATORS ──────────────────────────────────────────────
 validate_vmid() {
     local v="$1"
-    if ! [[ "$v" =~ ^[0-9]+$ ]] || [ "$v" -lt 100 ]; then
-        echo -e "  ${RED}  VMID harus angka >= 100.${NC}"
+    if ! [[ "$v" =~ ^[0-9]+$ ]] || [ "$v" -lt 101 ]; then
+        echo -e "  ${RED}  VMID harus angka >= 101.${NC}"
         return 1
     fi
     if pct status "$v" &>/dev/null 2>&1; then
@@ -522,7 +522,8 @@ show_dry_run() {
         "[5/${TOTAL_STEPS}] Install apache2, mysql-server, php + extensions"
         "[6/${TOTAL_STEPS}] Setup database MySQL: ${DB_NAME} / ${DB_USER}"
         "[7/${TOTAL_STEPS}] Download WordPress + konfigurasi wp-config.php"
-        "[8/${TOTAL_STEPS}] Konfigurasi Apache + aktifkan mod_rewrite"
+        "[8/${TOTAL_STEPS}] Konfigurasi PHP untuk WordPress"
+        "[9/${TOTAL_STEPS}] Konfigurasi Apache + aktifkan mod_rewrite"
     )
     for step in "${steps[@]}"; do
         echo -e "  ${DIM}o${NC}  ${step}"
@@ -652,6 +653,13 @@ run_install() {
     run_step "Menjalankan CT + tunggu siap" \
         "pct start ${VMID} && sleep 15"
 
+    # Connectivity check
+    info "Cek koneksi internet CT..."
+    if ! pct exec ${VMID} -- bash -c 'ping -c 2 -W 5 8.8.8.8 &>/dev/null || curl -sf --max-time 10 ifconfig.me &>/dev/null'; then
+        error "CT ${VMID} tidak memiliki koneksi internet. Periksa konfigurasi jaringan."
+    fi
+    log "Koneksi internet CT OK"
+
     # Step 4: Update & Upgrade
     run_step "apt update && apt upgrade" \
         "pct exec ${VMID} -- bash -c 'apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y'"
@@ -681,7 +689,16 @@ run_install() {
             sed -i \"s|username_here|${DB_USER}|\" wp-config.php &&
             sed -i \"s|password_here|${DB_PASS}|\" wp-config.php'"
 
-    # Step 8: Apache
+    # Step 8: PHP Config
+    run_step "Konfigurasi PHP untuk WordPress" \
+        "pct exec ${VMID} -- bash -c '
+            sed -i \"s/upload_max_filesize = .*/upload_max_filesize = 64M/\" /etc/php/*/apache2/php.ini &&
+            sed -i \"s/post_max_size = .*/post_max_size = 64M/\" /etc/php/*/apache2/php.ini &&
+            sed -i \"s/max_execution_time = .*/max_execution_time = 300/\" /etc/php/*/apache2/php.ini &&
+            sed -i \"s/memory_limit = .*/memory_limit = 256M/\" /etc/php/*/apache2/php.ini &&
+            systemctl restart apache2'"
+
+    # Step 9: Apache
     run_step "Konfigurasi Apache + mod_rewrite" \
         "pct exec ${VMID} -- bash -c 'cat > /etc/apache2/sites-available/000-default.conf << APACHEEOF
 <VirtualHost *:80>
@@ -735,9 +752,17 @@ APACHEEOF
     fi
     echo -e "  ${DIM}Full log: ${LOG_FILE}${NC}"
     echo ""
-}
 
-# ─── MAIN ────────────────────────────────────────────────────
+    # Post-install health check
+    local http_code
+    http_code=$(curl -so /dev/null -w '%{http_code}' --max-time 10 "http://${ip_clean}" 2>/dev/null || echo "000")
+    if [ "$http_code" = "200" ] || [ "$http_code" = "301" ]; then
+        log "WordPress merespons (HTTP ${http_code})"
+    else
+        warn "WordPress belum merespons (HTTP ${http_code}). Cek manual: curl -I http://${ip_clean}"
+    fi
+    echo ""
+}
 main() {
     show_banner
 
