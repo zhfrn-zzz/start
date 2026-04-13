@@ -46,13 +46,13 @@ DEFAULT_DB_USER="wpuser"
 DEFAULT_DB_PASS='P@ssw0rd123'
 
 # ─── KONFIGURASI PROXMOX ─────────────────────────────────────
-STORAGE="local-lvm"
-TEMPLATE_STORAGE="local"
+STORAGE_ROOT="local-lvm"    # untuk rootfs CT
+STORAGE_TMPL="local"        # untuk template
 TEMPLATE="ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
 BRIDGE="vmbr0"
 
 # ─── STEP TRACKING ───────────────────────────────────────────
-TOTAL_STEPS=9
+TOTAL_STEPS=10
 CURRENT_STEP=0
 INSTALL_START=0
 
@@ -264,6 +264,15 @@ handle_error() {
                 ;;
             a|A)
                 echo ""
+                read -rp "  => Hapus CT ${VMID} yang sudah terbuat? (y/n): " del_choice
+                if [[ "$del_choice" =~ ^[yY]$ ]]; then
+                    pct stop "$VMID" --force 2>/dev/null
+                    if pct destroy "$VMID" 2>/dev/null; then
+                        info "CT ${VMID} berhasil dihapus."
+                    else
+                        warn "Gagal menghapus CT ${VMID}."
+                    fi
+                fi
                 error "Installation aborted by user."
                 ;;
             *)
@@ -396,6 +405,14 @@ validate_ip() {
     return 0
 }
 
+validate_password() {
+    if [ ${#1} -lt 8 ]; then
+        echo -e "  ${RED}  Password minimal 8 karakter.${NC}"
+        return 1
+    fi
+    return 0
+}
+
 derive_gateway() {
     local ip="${1%/*}"
     echo "$(echo "$ip" | cut -d. -f1-3).1"
@@ -408,7 +425,7 @@ check_template() {
         warn "Template '${TEMPLATE}' tidak ditemukan."
         info "Mengunduh otomatis dari repositori Proxmox..."
         pveam update >> "$LOG_FILE" 2>&1 || error "Gagal update daftar template"
-        pveam download "$TEMPLATE_STORAGE" "$TEMPLATE" >> "$LOG_FILE" 2>&1 \
+        pveam download "$STORAGE_TMPL" "$TEMPLATE" >> "$LOG_FILE" 2>&1 \
             || error "Gagal mengunduh template"
         log "Template berhasil diunduh"
     fi
@@ -457,9 +474,12 @@ show_summary() {
         _row "CPU"          "${CPU} core"
         _row "Memory"       "${MEMORY} MB"
         _row "Swap"         "${SWAP} MB"
+        _row "Storage Root" "$STORAGE_ROOT"
+        _row "Storage Tmpl" "$STORAGE_TMPL"
         echo -e "  ${CYAN}├────────────────────┼──────────────────────────┤${NC}"
         _row "IP Address"   "$IP"
         _row "Gateway"      "$GW"
+        _row "Timezone"     "$TIMEZONE"
         echo -e "  ${CYAN}├────────────────────┼──────────────────────────┤${NC}"
         _row "DB Name"      "$DB_NAME"
         _row "DB User"      "$DB_USER"
@@ -479,9 +499,12 @@ show_summary() {
         _row "CPU"          "${CPU} core"
         _row "Memory"       "${MEMORY} MB"
         _row "Swap"         "${SWAP} MB"
+        _row "Storage Root" "$STORAGE_ROOT"
+        _row "Storage Tmpl" "$STORAGE_TMPL"
         echo -e "  ${CYAN}+--------------------+--------------------------+${NC}"
         _row "IP Address"   "$IP"
         _row "Gateway"      "$GW"
+        _row "Timezone"     "$TIMEZONE"
         echo -e "  ${CYAN}+--------------------+--------------------------+${NC}"
         _row "DB Name"      "$DB_NAME"
         _row "DB User"      "$DB_USER"
@@ -524,6 +547,7 @@ show_dry_run() {
         "[7/${TOTAL_STEPS}] Download WordPress + konfigurasi wp-config.php"
         "[8/${TOTAL_STEPS}] Konfigurasi PHP untuk WordPress"
         "[9/${TOTAL_STEPS}] Konfigurasi Apache + aktifkan mod_rewrite"
+        "[10/${TOTAL_STEPS}] Health check WordPress"
     )
     for step in "${steps[@]}"; do
         echo -e "  ${DIM}o${NC}  ${step}"
@@ -550,7 +574,7 @@ quick_install() {
     get_input "Hostname" "$DEFAULT_HOSTNAME"
     HOSTNAME="$INPUT_RESULT"
 
-    get_input "Password CT" "$DEFAULT_PASSWORD" "" "yes"
+    get_input "Password CT" "$DEFAULT_PASSWORD" "validate_password" "yes"
     PASSWORD="$INPUT_RESULT"
 
     get_input "IP Address (contoh: 192.168.10.5/24)" "" "validate_ip_cidr"
@@ -566,6 +590,7 @@ quick_install() {
     DB_NAME=$DEFAULT_DB_NAME
     DB_USER=$DEFAULT_DB_USER
     DB_PASS=$DEFAULT_DB_PASS
+    TIMEZONE="Asia/Jakarta"
 }
 
 # ─── MODE: CUSTOM INSTALL ────────────────────────────────────
@@ -580,7 +605,7 @@ custom_install() {
     get_input "Hostname" "$DEFAULT_HOSTNAME"
     HOSTNAME="$INPUT_RESULT"
 
-    get_input "Password CT" "$DEFAULT_PASSWORD" "" "yes"
+    get_input "Password CT" "$DEFAULT_PASSWORD" "validate_password" "yes"
     PASSWORD="$INPUT_RESULT"
 
     echo ""
@@ -597,6 +622,12 @@ custom_install() {
 
     get_input "Swap (MB)" "$DEFAULT_SWAP" "validate_number"
     SWAP="$INPUT_RESULT"
+
+    get_input "Storage CT (rootfs)" "$STORAGE_ROOT"
+    STORAGE_ROOT="$INPUT_RESULT"
+
+    get_input "Storage Template" "$STORAGE_TMPL"
+    STORAGE_TMPL="$INPUT_RESULT"
 
     echo ""
     info "[ Jaringan ]"
@@ -618,8 +649,14 @@ custom_install() {
     get_input "DB User" "$DEFAULT_DB_USER"
     DB_USER="$INPUT_RESULT"
 
-    get_input "DB Password" "$DEFAULT_DB_PASS" "" "yes"
+    get_input "DB Password" "$DEFAULT_DB_PASS" "validate_password" "yes"
     DB_PASS="$INPUT_RESULT"
+
+    echo ""
+    info "[ Lainnya ]"
+
+    get_input "Timezone CT" "Asia/Jakarta"
+    TIMEZONE="$INPUT_RESULT"
 }
 
 # ─── INSTALASI ───────────────────────────────────────────────
@@ -636,10 +673,10 @@ run_install() {
     # Step 2: Buat CT
     run_step "Membuat CT ${VMID} (${HOSTNAME})" \
         "pct create ${VMID} \
-            ${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE} \
+            ${STORAGE_TMPL}:vztmpl/${TEMPLATE} \
             --hostname '${HOSTNAME}' \
             --password '${PASSWORD}' \
-            --rootfs ${STORAGE}:${DISK} \
+            --rootfs ${STORAGE_ROOT}:${DISK} \
             --cores ${CPU} \
             --memory ${MEMORY} \
             --swap ${SWAP} \
@@ -651,14 +688,17 @@ run_install() {
 
     # Step 3: Start CT
     run_step "Menjalankan CT + tunggu siap" \
-        "pct start ${VMID} && sleep 15"
+        "pct start ${VMID} && { local _t=0; until pct exec ${VMID} -- echo ok &>/dev/null 2>&1; do sleep 2; _t=\$((_t+2)); [ \$_t -ge 60 ] && echo 'Timeout waiting for CT' && exit 1; done; }"
 
-    # Connectivity check
+    # Connectivity check (non-step)
     info "Cek koneksi internet CT..."
-    if ! pct exec ${VMID} -- bash -c 'ping -c 2 -W 5 8.8.8.8 &>/dev/null || curl -sf --max-time 10 ifconfig.me &>/dev/null'; then
+    if ! pct exec ${VMID} -- ping -c1 8.8.8.8 &>/dev/null; then
         error "CT ${VMID} tidak memiliki koneksi internet. Periksa konfigurasi jaringan."
     fi
     log "Koneksi internet CT OK"
+
+    # Set timezone
+    pct exec ${VMID} -- timedatectl set-timezone "$TIMEZONE" >> "$LOG_FILE" 2>&1
 
     # Step 4: Update & Upgrade
     run_step "apt update && apt upgrade" \
@@ -687,7 +727,9 @@ run_install() {
             cp wp-config-sample.php wp-config.php &&
             sed -i \"s|database_name_here|${DB_NAME}|\" wp-config.php &&
             sed -i \"s|username_here|${DB_USER}|\" wp-config.php &&
-            sed -i \"s|password_here|${DB_PASS}|\" wp-config.php'"
+            sed -i \"s|password_here|${DB_PASS}|\" wp-config.php &&
+            chmod 640 /var/www/html/wordpress/wp-config.php &&
+            chown root:www-data /var/www/html/wordpress/wp-config.php'"
 
     # Step 8: PHP Config
     run_step "Konfigurasi PHP untuk WordPress" \
@@ -714,6 +756,13 @@ run_install() {
 </VirtualHost>
 APACHEEOF
         a2enmod rewrite && systemctl restart apache2'"
+
+    # Step 10: Health check
+    local ip_clean="${IP%/*}"
+    run_step "Health check WordPress" \
+        "http_code=\$(pct exec ${VMID} -- curl -so /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1 2>/dev/null || echo 000); \
+         if [ \"\$http_code\" = \"200\" ] || [ \"\$http_code\" = \"301\" ]; then echo \"WordPress responding (HTTP \$http_code)\"; \
+         else echo \"WARNING: HTTP \$http_code - cek manual: curl -I http://${IP%/*}\"; fi; true"
 
     # Selesai
     local total_elapsed
@@ -752,18 +801,13 @@ APACHEEOF
     fi
     echo -e "  ${DIM}Full log: ${LOG_FILE}${NC}"
     echo ""
-
-    # Post-install health check
-    local http_code
-    http_code=$(curl -so /dev/null -w '%{http_code}' --max-time 10 "http://${ip_clean}" 2>/dev/null || echo "000")
-    if [ "$http_code" = "200" ] || [ "$http_code" = "301" ]; then
-        log "WordPress merespons (HTTP ${http_code})"
-    else
-        warn "WordPress belum merespons (HTTP ${http_code}). Cek manual: curl -I http://${ip_clean}"
-    fi
-    echo ""
 }
 main() {
+    if ! command -v pct &>/dev/null; then
+        echo "Error: pct tidak ditemukan. Script harus dijalankan di Proxmox host." >&2
+        exit 1
+    fi
+
     show_banner
 
     if $FANCY; then
