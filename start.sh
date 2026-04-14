@@ -722,7 +722,8 @@ run_install() {
             cd /tmp && wget -q https://wordpress.org/latest.tar.gz && tar -xzf latest.tar.gz &&
             mv wordpress /var/www/html/ &&
             chown -R www-data:www-data /var/www/html/wordpress &&
-            chmod -R 755 /var/www/html/wordpress &&
+            find /var/www/html/wordpress -type d -exec chmod 755 {} \\; &&
+            find /var/www/html/wordpress -type f -exec chmod 644 {} \\; &&
             cd /var/www/html/wordpress &&
             cp wp-config-sample.php wp-config.php &&
             sed -i \"s|database_name_here|${DB_NAME}|\" wp-config.php &&
@@ -737,8 +738,7 @@ run_install() {
             sed -i \"s/upload_max_filesize = .*/upload_max_filesize = 64M/\" /etc/php/*/apache2/php.ini &&
             sed -i \"s/post_max_size = .*/post_max_size = 64M/\" /etc/php/*/apache2/php.ini &&
             sed -i \"s/max_execution_time = .*/max_execution_time = 300/\" /etc/php/*/apache2/php.ini &&
-            sed -i \"s/memory_limit = .*/memory_limit = 256M/\" /etc/php/*/apache2/php.ini &&
-            systemctl restart apache2'"
+            sed -i \"s/memory_limit = .*/memory_limit = 256M/\" /etc/php/*/apache2/php.ini'"
 
     # Step 9: Apache
     run_step "Konfigurasi Apache + mod_rewrite" \
@@ -759,6 +759,7 @@ APACHEEOF
 
     # Step 10: Health check
     local ip_clean="${IP%/*}"
+    pct exec ${VMID} -- bash -c "command -v curl || apt-get install -y curl" >> "$LOG_FILE" 2>&1
     run_step "Health check WordPress" \
         "http_code=\$(pct exec ${VMID} -- curl -so /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1 2>/dev/null || echo 000); \
          if [ \"\$http_code\" = \"200\" ] || [ \"\$http_code\" = \"301\" ]; then echo \"WordPress responding (HTTP \$http_code)\"; \
