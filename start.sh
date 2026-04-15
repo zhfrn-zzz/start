@@ -180,6 +180,13 @@ run_step() {
             echo -e "  ${GREEN}[OK]${NC} ${DIM}[${bar}]${NC} ${prefix}  ${label}  ${DIM}${elapsed}${NC}"
         fi
         echo "[OK] Step selesai dalam ${elapsed}" >> "$LOG_FILE"
+    elif [ "$exit_code" -eq 2 ]; then
+        if $FANCY; then
+            echo -e "  ${YELLOW}⚠${NC} ${DIM}[${bar}]${NC} ${prefix}  ${label}  ${DIM}${elapsed}${NC}"
+        else
+            echo -e "  ${YELLOW}[WARN]${NC} ${DIM}[${bar}]${NC} ${prefix}  ${label}  ${DIM}${elapsed}${NC}"
+        fi
+        echo "[WARN] Step selesai dengan warning dalam ${elapsed}" >> "$LOG_FILE"
     else
         if $FANCY; then
             echo -e "  ${RED}✗${NC} ${DIM}[${bar}]${NC} ${prefix}  ${label}  ${DIM}${elapsed}${NC}"
@@ -759,11 +766,19 @@ APACHEEOF
 
     # Step 10: Health check
     local ip_clean="${IP%/*}"
-    pct exec ${VMID} -- bash -c "command -v curl || apt-get install -y curl" >> "$LOG_FILE" 2>&1
     run_step "Health check WordPress" \
-        "http_code=\$(pct exec ${VMID} -- curl -so /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1 2>/dev/null || echo 000); \
-         if [ \"\$http_code\" = \"200\" ] || [ \"\$http_code\" = \"301\" ]; then echo \"WordPress responding (HTTP \$http_code)\"; \
-         else echo \"WARNING: HTTP \$http_code - cek manual: curl -I http://${IP%/*}\"; fi; true"
+        "if ! pct exec ${VMID} -- command -v curl &>/dev/null; then
+            echo 'curl not found, installing...'
+            pct exec ${VMID} -- apt-get install -y curl
+        fi
+        http_code=\$(pct exec ${VMID} -- curl -so /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1 2>/dev/null || echo 000)
+        if [ \"\$http_code\" = \"200\" ] || [ \"\$http_code\" = \"301\" ] || [ \"\$http_code\" = \"302\" ]; then
+            echo \"WordPress responding (HTTP \$http_code)\"
+            exit 0
+        else
+            echo \"HTTP \$http_code — WordPress belum merespons dengan benar. Cek manual: curl -I http://${ip_clean}\"
+            exit 2
+        fi"
 
     # Selesai
     local total_elapsed
