@@ -32,6 +32,7 @@ NC='\033[0m'
 # ─── LOG FILE ────────────────────────────────────────────────
 LOG_FILE="/tmp/wp-install-$(date +%Y%m%d-%H%M%S).log"
 touch "$LOG_FILE"
+chmod 600 "$LOG_FILE"
 
 # ─── NILAI DEFAULT ───────────────────────────────────────────
 DEFAULT_VMID=105
@@ -100,24 +101,43 @@ stop_spinner() {
     fi
 }
 
+# ─── LOG REDACTION ───────────────────────────────────────────
+log_redact() {
+    local text="$1"
+    [ -n "$PASSWORD" ] && text="${text//$PASSWORD/***REDACTED***}"
+    [ -n "$DB_PASS" ] && text="${text//$DB_PASS/***REDACTED***}"
+    printf '%s' "$text"
+}
+
+_log_pipe() {
+    while IFS= read -r line; do
+        log_redact "$line" >> "$LOG_FILE"
+        echo "" >> "$LOG_FILE"
+    done
+}
+
 # ─── OUTPUT HELPERS ──────────────────────────────────────────
 log()  {
     stop_spinner
     echo -e "  ${GREEN}[+]${NC} $1"
-    echo "[OK]   $(date '+%H:%M:%S') $1" >> "$LOG_FILE"
+    log_redact "[OK]   $(date '+%H:%M:%S') $1" >> "$LOG_FILE"
+    echo "" >> "$LOG_FILE"
 }
 warn() {
     echo -e "  ${YELLOW}[!]${NC} $1"
-    echo "[WARN] $(date '+%H:%M:%S') $1" >> "$LOG_FILE"
+    log_redact "[WARN] $(date '+%H:%M:%S') $1" >> "$LOG_FILE"
+    echo "" >> "$LOG_FILE"
 }
 info() {
     echo -e "  ${BLUE}[i]${NC} $1"
-    echo "[INFO] $(date '+%H:%M:%S') $1" >> "$LOG_FILE"
+    log_redact "[INFO] $(date '+%H:%M:%S') $1" >> "$LOG_FILE"
+    echo "" >> "$LOG_FILE"
 }
 error() {
     stop_spinner
     echo -e "\n  ${RED}[x]${NC} ${BOLD}$1${NC}"
-    echo "[ERR]  $(date '+%H:%M:%S') $1" >> "$LOG_FILE"
+    log_redact "[ERR]  $(date '+%H:%M:%S') $1" >> "$LOG_FILE"
+    echo "" >> "$LOG_FILE"
     echo -e "  ${DIM}Log: ${LOG_FILE}${NC}"
     exit 1
 }
@@ -145,7 +165,8 @@ run_step() {
     step_start=$(date +%s)
 
     echo "" >> "$LOG_FILE"
-    echo "=== [${prefix}] ${label} ===" >> "$LOG_FILE"
+    log_redact "=== [${prefix}] ${label} ===" >> "$LOG_FILE"
+    echo "" >> "$LOG_FILE"
 
     # Progress bar
     local filled=$(( CURRENT_STEP * 20 / TOTAL_STEPS ))
@@ -161,12 +182,12 @@ run_step() {
 
     if $VERBOSE; then
         echo -e "  ${DIM}[${bar}]${NC} ${CYAN}${prefix}${NC}  ${label}"
-        eval "$cmd" 2>&1 | tee -a "$LOG_FILE"
+        eval "$cmd" 2>&1 | tee >(_log_pipe)
         local exit_code="${PIPESTATUS[0]}"
     else
         start_spinner "[${bar}] ${prefix}  ${label}"
-        eval "$cmd" >> "$LOG_FILE" 2>&1
-        local exit_code=$?
+        eval "$cmd" 2>&1 | _log_pipe
+        local exit_code="${PIPESTATUS[0]}"
         stop_spinner
     fi
 
@@ -237,12 +258,12 @@ handle_error() {
                 local t_start
                 t_start=$(date +%s)
                 if $VERBOSE; then
-                    eval "$cmd" 2>&1 | tee -a "$LOG_FILE"
+                    eval "$cmd" 2>&1 | tee >(_log_pipe)
                     local ec="${PIPESTATUS[0]}"
                 else
                     start_spinner "Retrying: ${label}"
-                    eval "$cmd" >> "$LOG_FILE" 2>&1
-                    local ec=$?
+                    eval "$cmd" 2>&1 | _log_pipe
+                    local ec="${PIPESTATUS[0]}"
                     stop_spinner
                 fi
                 local elapsed
@@ -431,8 +452,8 @@ check_template() {
     if [ ! -f "$path" ]; then
         warn "Template '${TEMPLATE}' tidak ditemukan."
         info "Mengunduh otomatis dari repositori Proxmox..."
-        pveam update >> "$LOG_FILE" 2>&1 || error "Gagal update daftar template"
-        pveam download "$STORAGE_TMPL" "$TEMPLATE" >> "$LOG_FILE" 2>&1 \
+        pveam update 2>&1 | _log_pipe || error "Gagal update daftar template"
+        pveam download "$STORAGE_TMPL" "$TEMPLATE" 2>&1 | _log_pipe \
             || error "Gagal mengunduh template"
         log "Template berhasil diunduh"
     fi
@@ -705,7 +726,7 @@ run_install() {
     log "Koneksi internet CT OK"
 
     # Set timezone
-    pct exec ${VMID} -- timedatectl set-timezone "$TIMEZONE" >> "$LOG_FILE" 2>&1
+    pct exec ${VMID} -- timedatectl set-timezone "$TIMEZONE" 2>&1 | _log_pipe
 
     # Step 4: Update & Upgrade
     run_step "apt update && apt upgrade" \
