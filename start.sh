@@ -754,6 +754,24 @@ run_install() {
             find /var/www/html/wordpress -type f -exec chmod 644 {} \\; &&
             cd /var/www/html/wordpress &&
             cp wp-config-sample.php wp-config.php &&
+            if grep -q \"put your unique phrase here\" wp-config.php; then
+                SALTS=\$(curl -sf --max-time 10 https://api.wordpress.org/secret-key/1.1/salt/ 2>/dev/null)
+                if [ -z \"\$SALTS\" ]; then
+                    SALTS=\"\"
+                    for KEY in AUTH_KEY SECURE_AUTH_KEY LOGGED_IN_KEY NONCE_KEY AUTH_SALT SECURE_AUTH_SALT LOGGED_IN_SALT NONCE_SALT; do
+                        VAL=\$(openssl rand -base64 64 | tr -d \"\\n\")
+                        SALTS+=\"define(\\x27\${KEY}\\x27, \\x27\${VAL}\\x27);\\n\"
+                    done
+                fi
+                sed -i \"/put your unique phrase here/d\" wp-config.php
+                MARKER=\$(grep -n \"Authentication unique keys\" wp-config.php | tail -1 | cut -d: -f1)
+                if [ -n \"\$MARKER\" ]; then
+                    sed -i \"\${MARKER}a\\\\
+\$(echo -e \"\$SALTS\")\" wp-config.php
+                else
+                    echo -e \"\$SALTS\" >> wp-config.php
+                fi
+            fi &&
             sed -i \"s|database_name_here|${DB_NAME}|\" wp-config.php &&
             sed -i \"s|username_here|${DB_USER}|\" wp-config.php &&
             sed -i \"s|password_here|${DB_PASS}|\" wp-config.php &&
