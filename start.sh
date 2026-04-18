@@ -155,10 +155,10 @@ section() {
 }
 
 # ─── RUN STEP ────────────────────────────────────────────────
-# Usage: run_step "Label" "bash command string"
+# Usage: run_step "Label" command [arg1 arg2 ...]
 run_step() {
-    local label="$1"
-    local cmd="$2"
+    local label="$1"; shift
+    local -a cmd=("$@")
     CURRENT_STEP=$((CURRENT_STEP + 1))
     local prefix="${CURRENT_STEP}/${TOTAL_STEPS}"
     local step_start
@@ -182,11 +182,11 @@ run_step() {
 
     if $VERBOSE; then
         echo -e "  ${DIM}[${bar}]${NC} ${CYAN}${prefix}${NC}  ${label}"
-        eval "$cmd" 2>&1 | tee >(_log_pipe)
+        "${cmd[@]}" 2>&1 | tee >(_log_pipe)
         local exit_code="${PIPESTATUS[0]}"
     else
         start_spinner "[${bar}] ${prefix}  ${label}"
-        eval "$cmd" 2>&1 | _log_pipe
+        "${cmd[@]}" 2>&1 | _log_pipe
         local exit_code="${PIPESTATUS[0]}"
         stop_spinner
     fi
@@ -214,14 +214,14 @@ run_step() {
         else
             echo -e "  ${RED}[FAIL]${NC} ${DIM}[${bar}]${NC} ${prefix}  ${label}  ${DIM}${elapsed}${NC}"
         fi
-        handle_error "$label" "$cmd"
+        handle_error "$label" "${cmd[@]}"
     fi
 }
 
 # ─── ERROR RECOVERY ──────────────────────────────────────────
 handle_error() {
-    local label="$1"
-    local cmd="$2"
+    local label="$1"; shift
+    local -a cmd=("$@")
 
     echo ""
     if $FANCY; then
@@ -258,11 +258,11 @@ handle_error() {
                 local t_start
                 t_start=$(date +%s)
                 if $VERBOSE; then
-                    eval "$cmd" 2>&1 | tee >(_log_pipe)
+                    "${cmd[@]}" 2>&1 | tee >(_log_pipe)
                     local ec="${PIPESTATUS[0]}"
                 else
                     start_spinner "Retrying: ${label}"
-                    eval "$cmd" 2>&1 | _log_pipe
+                    "${cmd[@]}" 2>&1 | _log_pipe
                     local ec="${PIPESTATUS[0]}"
                     stop_spinner
                 fi
@@ -696,27 +696,38 @@ run_install() {
     echo ""
 
     # Step 1: Template
-    run_step "Cek / download template" "check_template"
+    run_step "Cek / download template" check_template
 
     # Step 2: Buat CT
     run_step "Membuat CT ${VMID} (${HOSTNAME})" \
-        "pct create ${VMID} \
-            ${STORAGE_TMPL}:vztmpl/${TEMPLATE} \
-            --hostname '${HOSTNAME}' \
-            --password '${PASSWORD}' \
-            --rootfs ${STORAGE_ROOT}:${DISK} \
-            --cores ${CPU} \
-            --memory ${MEMORY} \
-            --swap ${SWAP} \
-            --net0 name=eth0,bridge=${BRIDGE},ip=${IP},gw=${GW} \
+        pct create "${VMID}" \
+            "${STORAGE_TMPL}:vztmpl/${TEMPLATE}" \
+            --hostname "${HOSTNAME}" \
+            --password "${PASSWORD}" \
+            --rootfs "${STORAGE_ROOT}:${DISK}" \
+            --cores "${CPU}" \
+            --memory "${MEMORY}" \
+            --swap "${SWAP}" \
+            --net0 "name=eth0,bridge=${BRIDGE},ip=${IP},gw=${GW}" \
             --unprivileged 1 \
             --features nesting=1 \
             --ostype ubuntu \
-            --start 0"
+            --start 0
 
     # Step 3: Start CT
-    run_step "Menjalankan CT + tunggu siap" \
-        "pct start ${VMID} && { local _t=0; until pct exec ${VMID} -- echo ok &>/dev/null 2>&1; do sleep 2; _t=\$((_t+2)); [ \$_t -ge 60 ] && echo 'Timeout waiting for CT' && exit 1; done; }"
+    _wait_ct_ready() {
+        pct start "${VMID}" || return 1
+        local _t=0
+        until pct exec "${VMID}" -- echo ok &>/dev/null; do
+            sleep 2
+            _t=$((_t+2))
+            if [ $_t -ge 60 ]; then
+                echo 'Timeout waiting for CT'
+                return 1
+            fi
+        done
+    }
+    run_step "Menjalankan CT + tunggu siap" _wait_ct_ready
 
     # Connectivity check (non-step)
     info "Cek koneksi internet CT..."
@@ -730,65 +741,80 @@ run_install() {
 
     # Step 4: Update & Upgrade
     run_step "apt update && apt upgrade" \
-        "pct exec ${VMID} -- bash -c 'apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y'"
+        pct exec "${VMID}" -- bash -c 'apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y'
 
     # Step 5: Install LAMP
     run_step "Install LAMP stack (Apache, MySQL, PHP)" \
-        "pct exec ${VMID} -- bash -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        pct exec "${VMID}" -- bash -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y \
             apache2 mysql-server php php-mysql php-curl php-gd \
-            php-mbstring php-xml php-zip libapache2-mod-php'"
+            php-mbstring php-xml php-zip libapache2-mod-php'
 
     # Step 6: Setup Database
-    run_step "Setup database MySQL" \
-        "pct exec ${VMID} -- bash -c \"mysql -e \\\"CREATE DATABASE ${DB_NAME} DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\\\"\" && \
-         pct exec ${VMID} -- bash -c \"mysql -e \\\"CREATE USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';\\\"\" && \
-         pct exec ${VMID} -- bash -c \"mysql -e \\\"GRANT ALL ON ${DB_NAME}.* TO '${DB_USER}'@'localhost'; FLUSH PRIVILEGES;\\\"\""
+    _setup_db() {
+        pct exec "${VMID}" -- bash -c '
+            DB_NAME="$1"; DB_USER="$2"; DB_PASS="$3"
+            ESCAPED_PASS="${DB_PASS//\\/\\\\}"
+            ESCAPED_PASS="${ESCAPED_PASS//'"'"'/\\'"'"'}"
+            mysql -e "CREATE DATABASE \`${DB_NAME}\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" &&
+            mysql -e "CREATE USER '"'"'${DB_USER}'"'"'@'"'"'localhost'"'"' IDENTIFIED BY '"'"'${ESCAPED_PASS}'"'"';" &&
+            mysql -e "GRANT ALL ON \`${DB_NAME}\`.* TO '"'"'${DB_USER}'"'"'@'"'"'localhost'"'"'; FLUSH PRIVILEGES;"
+        ' -- "${DB_NAME}" "${DB_USER}" "${DB_PASS}"
+    }
+    run_step "Setup database MySQL" _setup_db
 
     # Step 7: WordPress
-    run_step "Download & install WordPress" \
-        "pct exec ${VMID} -- bash -c '
+    _install_wordpress() {
+        pct exec "${VMID}" -- bash -c '
             cd /tmp && wget -q https://wordpress.org/latest.tar.gz && tar -xzf latest.tar.gz &&
             mv wordpress /var/www/html/ &&
             chown -R www-data:www-data /var/www/html/wordpress &&
-            find /var/www/html/wordpress -type d -exec chmod 755 {} \\; &&
-            find /var/www/html/wordpress -type f -exec chmod 644 {} \\; &&
+            find /var/www/html/wordpress -type d -exec chmod 755 {} \; &&
+            find /var/www/html/wordpress -type f -exec chmod 644 {} \; &&
             cd /var/www/html/wordpress &&
             cp wp-config-sample.php wp-config.php &&
-            if grep -q \"put your unique phrase here\" wp-config.php; then
-                SALTS=\$(curl -sf --max-time 10 https://api.wordpress.org/secret-key/1.1/salt/ 2>/dev/null)
-                if [ -z \"\$SALTS\" ]; then
-                    SALTS=\"\"
+            if grep -q "put your unique phrase here" wp-config.php; then
+                SALTS=$(curl -sf --max-time 10 https://api.wordpress.org/secret-key/1.1/salt/ 2>/dev/null)
+                if [ -z "$SALTS" ]; then
+                    SALTS=""
                     for KEY in AUTH_KEY SECURE_AUTH_KEY LOGGED_IN_KEY NONCE_KEY AUTH_SALT SECURE_AUTH_SALT LOGGED_IN_SALT NONCE_SALT; do
-                        VAL=\$(openssl rand -base64 64 | tr -d \"\\n\")
-                        SALTS+=\"define(\\x27\${KEY}\\x27, \\x27\${VAL}\\x27);\\n\"
+                        VAL=$(openssl rand -base64 64 | tr -d "\n")
+                        SALTS="${SALTS}define('"'"'${KEY}'"'"', '"'"'${VAL}'"'"');\n"
                     done
                 fi
-                sed -i \"/put your unique phrase here/d\" wp-config.php
-                MARKER=\$(grep -n \"Authentication unique keys\" wp-config.php | tail -1 | cut -d: -f1)
-                if [ -n \"\$MARKER\" ]; then
-                    sed -i \"\${MARKER}a\\\\
-\$(echo -e \"\$SALTS\")\" wp-config.php
+                sed -i "/put your unique phrase here/d" wp-config.php
+                MARKER=$(grep -n "Authentication unique keys" wp-config.php | tail -1 | cut -d: -f1)
+                if [ -n "$MARKER" ]; then
+                    sed -i "${MARKER}a\\
+$(printf "%b" "$SALTS")" wp-config.php
                 else
-                    echo -e \"\$SALTS\" >> wp-config.php
+                    printf "%b" "$SALTS" >> wp-config.php
                 fi
             fi &&
-            sed -i \"s|database_name_here|${DB_NAME}|\" wp-config.php &&
-            sed -i \"s|username_here|${DB_USER}|\" wp-config.php &&
-            sed -i \"s|password_here|${DB_PASS}|\" wp-config.php &&
+            php -r "
+                \$f = '"'"'wp-config.php'"'"';
+                \$c = file_get_contents(\$f);
+                \$c = str_replace('"'"'database_name_here'"'"', \$argv[1], \$c);
+                \$c = str_replace('"'"'username_here'"'"', \$argv[2], \$c);
+                \$c = str_replace('"'"'password_here'"'"', \$argv[3], \$c);
+                file_put_contents(\$f, \$c);
+            " "$1" "$2" "$3" &&
             chmod 640 /var/www/html/wordpress/wp-config.php &&
-            chown root:www-data /var/www/html/wordpress/wp-config.php'"
+            chown root:www-data /var/www/html/wordpress/wp-config.php
+        ' -- "${DB_NAME}" "${DB_USER}" "${DB_PASS}"
+    }
+    run_step "Download & install WordPress" _install_wordpress
 
     # Step 8: PHP Config
     run_step "Konfigurasi PHP untuk WordPress" \
-        "pct exec ${VMID} -- bash -c '
-            sed -i \"s/upload_max_filesize = .*/upload_max_filesize = 64M/\" /etc/php/*/apache2/php.ini &&
-            sed -i \"s/post_max_size = .*/post_max_size = 64M/\" /etc/php/*/apache2/php.ini &&
-            sed -i \"s/max_execution_time = .*/max_execution_time = 300/\" /etc/php/*/apache2/php.ini &&
-            sed -i \"s/memory_limit = .*/memory_limit = 256M/\" /etc/php/*/apache2/php.ini'"
+        pct exec "${VMID}" -- bash -c '
+            sed -i "s/upload_max_filesize = .*/upload_max_filesize = 64M/" /etc/php/*/apache2/php.ini &&
+            sed -i "s/post_max_size = .*/post_max_size = 64M/" /etc/php/*/apache2/php.ini &&
+            sed -i "s/max_execution_time = .*/max_execution_time = 300/" /etc/php/*/apache2/php.ini &&
+            sed -i "s/memory_limit = .*/memory_limit = 256M/" /etc/php/*/apache2/php.ini'
 
     # Step 9: Apache
-    run_step "Konfigurasi Apache + mod_rewrite" \
-        "pct exec ${VMID} -- bash -c 'cat > /etc/apache2/sites-available/000-default.conf << APACHEEOF
+    _setup_apache() {
+        pct exec "${VMID}" -- bash -c 'cat > /etc/apache2/sites-available/000-default.conf << "APACHEEOF"
 <VirtualHost *:80>
     ServerAdmin webmaster@localhost
     DocumentRoot /var/www/html/wordpress
@@ -797,27 +823,32 @@ run_install() {
         AllowOverride All
         Require all granted
     </Directory>
-    ErrorLog \\\${APACHE_LOG_DIR}/error.log
-    CustomLog \\\${APACHE_LOG_DIR}/access.log combined
+    ErrorLog ${APACHE_LOG_DIR}/error.log
+    CustomLog ${APACHE_LOG_DIR}/access.log combined
 </VirtualHost>
 APACHEEOF
-        a2enmod rewrite && systemctl restart apache2'"
+a2enmod rewrite && systemctl restart apache2'
+    }
+    run_step "Konfigurasi Apache + mod_rewrite" _setup_apache
 
     # Step 10: Health check
     local ip_clean="${IP%/*}"
-    run_step "Health check WordPress" \
-        "if ! pct exec ${VMID} -- command -v curl &>/dev/null; then
+    _health_check() {
+        if ! pct exec "${VMID}" -- command -v curl &>/dev/null; then
             echo 'curl not found, installing...'
-            pct exec ${VMID} -- apt-get install -y curl
+            pct exec "${VMID}" -- apt-get install -y curl
         fi
-        http_code=\$(pct exec ${VMID} -- curl -so /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1 2>/dev/null || echo 000)
-        if [ \"\$http_code\" = \"200\" ] || [ \"\$http_code\" = \"301\" ] || [ \"\$http_code\" = \"302\" ]; then
-            echo \"WordPress responding (HTTP \$http_code)\"
-            exit 0
+        local http_code
+        http_code=$(pct exec "${VMID}" -- curl -so /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1 2>/dev/null || echo 000)
+        if [ "$http_code" = "200" ] || [ "$http_code" = "301" ] || [ "$http_code" = "302" ]; then
+            echo "WordPress responding (HTTP $http_code)"
+            return 0
         else
-            echo \"HTTP \$http_code — WordPress belum merespons dengan benar. Cek manual: curl -I http://${ip_clean}\"
-            exit 2
-        fi"
+            echo "HTTP $http_code — WordPress belum merespons dengan benar. Cek manual: curl -I http://${ip_clean}"
+            return 2
+        fi
+    }
+    run_step "Health check WordPress" _health_check
 
     # Selesai
     local total_elapsed
