@@ -37,14 +37,12 @@ chmod 600 "$LOG_FILE"
 # ─── NILAI DEFAULT ───────────────────────────────────────────
 DEFAULT_VMID=105
 DEFAULT_HOSTNAME="wordpress"
-DEFAULT_PASSWORD="12345678"
 DEFAULT_DISK=64
 DEFAULT_CPU=4
 DEFAULT_MEMORY=2048
 DEFAULT_SWAP=2048
 DEFAULT_DB_NAME="wordpress"
 DEFAULT_DB_USER="wpuser"
-DEFAULT_DB_PASS='P@ssw0rd123'
 
 # ─── KONFIGURASI PROXMOX ─────────────────────────────────────
 STORAGE_ROOT="local-lvm"    # untuk rootfs CT
@@ -395,6 +393,28 @@ get_input() {
     done
 }
 
+# ─── PASSWORD GENERATOR ───────────────────────────────────────
+gen_password() {
+    openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c16
+}
+
+get_password_input() {
+    local prompt="$1"
+    local generated
+    generated=$(gen_password)
+    while true; do
+        echo -e "  => ${prompt} [generated: ${GREEN}${generated}${NC}, Enter=pakai ini, atau ketik sendiri]"
+        read -rs -p "  => " INPUT_RESULT
+        echo ""
+        INPUT_RESULT="${INPUT_RESULT:-$generated}"
+        if [ ${#INPUT_RESULT} -lt 12 ]; then
+            echo -e "  ${RED}  Password minimal 12 karakter.${NC}"
+            continue
+        fi
+        break
+    done
+}
+
 # ─── VALIDATORS ──────────────────────────────────────────────
 validate_vmid() {
     local v="$1"
@@ -434,8 +454,8 @@ validate_ip() {
 }
 
 validate_password() {
-    if [ ${#1} -lt 8 ]; then
-        echo -e "  ${RED}  Password minimal 8 karakter.${NC}"
+    if [ ${#1} -lt 12 ]; then
+        echo -e "  ${RED}  Password minimal 12 karakter.${NC}"
         return 1
     fi
     return 0
@@ -462,10 +482,9 @@ check_template() {
 # ─── RINGKASAN KONFIGURASI ───────────────────────────────────
 show_summary() {
     local ip_clean="${IP%/*}"
-    local pass_mask
-    pass_mask=$(printf '%s' "$PASSWORD" | sed 's/./*/g')
-    local dbpass_mask
-    dbpass_mask=$(printf '%s' "$DB_PASS" | sed 's/./*/g')
+
+    echo ""
+    echo -e "  ${YELLOW}${BOLD}! Save password sekarang — tidak akan ditampilkan lagi setelah install.${NC}"
 
     # Helper: print a row with proper alignment (ANSI-safe)
     _row() {
@@ -496,7 +515,7 @@ show_summary() {
         echo -e "  ${CYAN}├────────────────────┼──────────────────────────┤${NC}"
         _row "VMID"         "$VMID"
         _row "Hostname"     "$HOSTNAME"
-        _row "Password CT"  "$pass_mask"
+        _row "Password CT"  "$PASSWORD" "$YELLOW"
         echo -e "  ${CYAN}├────────────────────┼──────────────────────────┤${NC}"
         _row "Disk"         "${DISK} GB"
         _row "CPU"          "${CPU} core"
@@ -511,7 +530,7 @@ show_summary() {
         echo -e "  ${CYAN}├────────────────────┼──────────────────────────┤${NC}"
         _row "DB Name"      "$DB_NAME"
         _row "DB User"      "$DB_USER"
-        _row "DB Password"  "$dbpass_mask"
+        _row "DB Password"  "$DB_PASS" "$YELLOW"
         echo -e "  ${CYAN}├────────────────────┼──────────────────────────┤${NC}"
         _row "WordPress URL" "http://${ip_clean}" "$GREEN"
         echo -e "  ${CYAN}└────────────────────┴──────────────────────────┘${NC}"
@@ -521,7 +540,7 @@ show_summary() {
         echo -e "  ${CYAN}+--------------------+--------------------------+${NC}"
         _row "VMID"         "$VMID"
         _row "Hostname"     "$HOSTNAME"
-        _row "Password CT"  "$pass_mask"
+        _row "Password CT"  "$PASSWORD" "$YELLOW"
         echo -e "  ${CYAN}+--------------------+--------------------------+${NC}"
         _row "Disk"         "${DISK} GB"
         _row "CPU"          "${CPU} core"
@@ -536,7 +555,7 @@ show_summary() {
         echo -e "  ${CYAN}+--------------------+--------------------------+${NC}"
         _row "DB Name"      "$DB_NAME"
         _row "DB User"      "$DB_USER"
-        _row "DB Password"  "$dbpass_mask"
+        _row "DB Password"  "$DB_PASS" "$YELLOW"
         echo -e "  ${CYAN}+--------------------+--------------------------+${NC}"
         _row "WordPress URL" "http://${ip_clean}" "$GREEN"
         echo -e "  ${CYAN}+--------------------+--------------------------+${NC}"
@@ -602,7 +621,7 @@ quick_install() {
     get_input "Hostname" "$DEFAULT_HOSTNAME"
     HOSTNAME="$INPUT_RESULT"
 
-    get_input "Password CT" "$DEFAULT_PASSWORD" "validate_password" "yes"
+    get_password_input "Password CT"
     PASSWORD="$INPUT_RESULT"
 
     get_input "IP Address (contoh: 192.168.10.5/24)" "" "validate_ip_cidr"
@@ -617,7 +636,8 @@ quick_install() {
     SWAP=$DEFAULT_SWAP
     DB_NAME=$DEFAULT_DB_NAME
     DB_USER=$DEFAULT_DB_USER
-    DB_PASS=$DEFAULT_DB_PASS
+    get_password_input "DB Password"
+    DB_PASS="$INPUT_RESULT"
     TIMEZONE="Asia/Jakarta"
 }
 
@@ -633,7 +653,7 @@ custom_install() {
     get_input "Hostname" "$DEFAULT_HOSTNAME"
     HOSTNAME="$INPUT_RESULT"
 
-    get_input "Password CT" "$DEFAULT_PASSWORD" "validate_password" "yes"
+    get_password_input "Password CT"
     PASSWORD="$INPUT_RESULT"
 
     echo ""
@@ -677,7 +697,7 @@ custom_install() {
     get_input "DB User" "$DEFAULT_DB_USER"
     DB_USER="$INPUT_RESULT"
 
-    get_input "DB Password" "$DEFAULT_DB_PASS" "validate_password" "yes"
+    get_password_input "DB Password"
     DB_PASS="$INPUT_RESULT"
 
     echo ""
@@ -870,6 +890,12 @@ a2enmod rewrite && systemctl restart apache2'
     echo -e "  ${BOLD}Hostname${NC}      ${HOSTNAME}"
     echo -e "  ${BOLD}IP Address${NC}    ${ip_clean}"
     echo -e "  ${BOLD}Duration${NC}      ${total_elapsed}"
+    echo ""
+    echo -e "  ${YELLOW}${BOLD}! Save credential ini — tidak akan ditampilkan lagi.${NC}"
+    echo -e "  ${BOLD}Password CT${NC}   ${YELLOW}${PASSWORD}${NC}"
+    echo -e "  ${BOLD}DB Name${NC}       ${DB_NAME}"
+    echo -e "  ${BOLD}DB User${NC}       ${DB_USER}"
+    echo -e "  ${BOLD}DB Password${NC}   ${YELLOW}${DB_PASS}${NC}"
     echo ""
     if $FANCY; then
         echo -e "  ${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
