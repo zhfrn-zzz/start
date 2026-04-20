@@ -751,9 +751,26 @@ run_install() {
 
     # Connectivity check (non-step)
     info "Cek koneksi internet CT..."
-    if ! pct exec ${VMID} -- ping -c1 8.8.8.8 &>/dev/null; then
-        error "CT ${VMID} tidak memiliki koneksi internet. Periksa konfigurasi jaringan."
-    fi
+    pct exec "${VMID}" -- bash -c 'command -v curl >/dev/null || apt-get install -y curl' 2>&1 | _log_pipe
+    _check_url() {
+        local url="$1"
+        local result
+        result=$(pct exec "${VMID}" -- curl -sI --max-time 5 -o /dev/null -w "%{http_code}" "$url" 2>/dev/null)
+        local ec=$?
+        if [ "$ec" -eq 6 ]; then
+            error "DNS resolution failed untuk ${url} — cek /etc/resolv.conf di CT ${VMID}"
+        elif [ "$ec" -eq 28 ]; then
+            error "Network timeout ke ${url} — kemungkinan no route atau firewall block"
+        elif [ "$ec" -ne 0 ]; then
+            error "Curl gagal (exit ${ec}) ke ${url} — cek jaringan CT ${VMID}"
+        fi
+        case "$result" in
+            200|301|302) return 0 ;;
+            *) error "Upstream issue di ${url} (HTTP ${result})" ;;
+        esac
+    }
+    _check_url "http://archive.ubuntu.com"
+    _check_url "https://wordpress.org"
     log "Koneksi internet CT OK"
 
     # Set timezone
