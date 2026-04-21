@@ -64,6 +64,37 @@ format_time() {
     fi
 }
 
+# ─── CLEANUP TRAP ─────────────────────────────────────────────
+CT_CREATED=false
+INSTALL_SUCCESS=false
+INTERRUPTED=false
+
+cleanup_on_exit() {
+    if [ -n "$SPINNER_PID" ]; then
+        kill "$SPINNER_PID" 2>/dev/null
+        wait "$SPINNER_PID" 2>/dev/null || true
+        SPINNER_PID=""
+    fi
+    tput cnorm 2>/dev/null || true
+    $INSTALL_SUCCESS && return
+    if $INTERRUPTED; then
+        echo ""
+        echo -e "  ${RED}[x]${NC} Interrupted by user."
+        if $CT_CREATED; then
+            read -rp "  => Hapus CT ${VMID} yang setengah jadi? (y/n): " del_choice
+            if [[ "$del_choice" =~ ^[yY]$ ]]; then
+                pct stop "$VMID" --force 2>/dev/null
+                pct destroy "$VMID" 2>/dev/null && \
+                    echo -e "  ${GREEN}[+]${NC} CT ${VMID} dihapus." || \
+                    echo -e "  ${YELLOW}[!]${NC} Gagal menghapus CT ${VMID}."
+            fi
+        fi
+    fi
+}
+
+trap 'INTERRUPTED=true; cleanup_on_exit; exit 130' INT TERM
+trap 'cleanup_on_exit' EXIT
+
 # ─── SPINNER ─────────────────────────────────────────────────
 SPINNER_PID=""
 
@@ -76,6 +107,7 @@ fi
 start_spinner() {
     local label="$1"
     $VERBOSE && return
+    tput civis 2>/dev/null || true
     (
         local i=0
         local len=${#SPINNER_CHARS}
@@ -96,6 +128,7 @@ stop_spinner() {
         wait "$SPINNER_PID" 2>/dev/null || true
         SPINNER_PID=""
         printf "\r\033[K"
+        tput cnorm 2>/dev/null || true
     fi
 }
 
@@ -734,6 +767,8 @@ run_install() {
             --ostype ubuntu \
             --start 0
 
+    CT_CREATED=true
+
     # Step 3: Start CT
     _wait_ct_ready() {
         pct start "${VMID}" || return 1
@@ -888,6 +923,7 @@ a2enmod rewrite && systemctl restart apache2'
     run_step "Health check WordPress" _health_check
 
     # Selesai
+    INSTALL_SUCCESS=true
     local total_elapsed
     total_elapsed=$(format_time $(( $(date +%s) - INSTALL_START )))
     local ip_clean="${IP%/*}"
