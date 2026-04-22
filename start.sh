@@ -54,6 +54,7 @@ BRIDGE="vmbr0"
 TOTAL_STEPS=10
 CURRENT_STEP=0
 INSTALL_START=0
+_STEP_SEVERITY="recoverable"
 
 format_time() {
     local s=$1
@@ -268,21 +269,39 @@ handle_error() {
     echo ""
 
     while true; do
-        if $FANCY; then
-            echo -e "  ${BOLD}Recovery Options:${NC}"
-            echo -e "    ${CYAN}r${NC} │ Retry this step"
-            echo -e "    ${CYAN}s${NC} │ Skip and continue"
-            echo -e "    ${CYAN}l${NC} │ Show last 30 log lines"
-            echo -e "    ${CYAN}a${NC} │ Abort installation"
+        if [ "$_STEP_SEVERITY" = "critical" ]; then
+            echo -e "  ${RED}${BOLD}Step ini critical — skip tidak tersedia.${NC}"
+            echo ""
+            if $FANCY; then
+                echo -e "  ${BOLD}Recovery Options:${NC}"
+                echo -e "    ${CYAN}r${NC} │ Retry this step"
+                echo -e "    ${CYAN}l${NC} │ Show last 30 log lines"
+                echo -e "    ${CYAN}a${NC} │ Abort installation"
+            else
+                echo -e "  ${BOLD}Recovery Options:${NC}"
+                echo -e "    ${CYAN}r${NC} | Retry this step"
+                echo -e "    ${CYAN}l${NC} | Show last 30 log lines"
+                echo -e "    ${CYAN}a${NC} | Abort installation"
+            fi
+            echo ""
+            read -rp "  => Choice (r/l/a): " choice
         else
-            echo -e "  ${BOLD}Recovery Options:${NC}"
-            echo -e "    ${CYAN}r${NC} | Retry this step"
-            echo -e "    ${CYAN}s${NC} | Skip and continue"
-            echo -e "    ${CYAN}l${NC} | Show last 30 log lines"
-            echo -e "    ${CYAN}a${NC} | Abort installation"
+            if $FANCY; then
+                echo -e "  ${BOLD}Recovery Options:${NC}"
+                echo -e "    ${CYAN}r${NC} │ Retry this step"
+                echo -e "    ${CYAN}s${NC} │ Skip and continue"
+                echo -e "    ${CYAN}l${NC} │ Show last 30 log lines"
+                echo -e "    ${CYAN}a${NC} │ Abort installation"
+            else
+                echo -e "  ${BOLD}Recovery Options:${NC}"
+                echo -e "    ${CYAN}r${NC} | Retry this step"
+                echo -e "    ${CYAN}s${NC} | Skip and continue"
+                echo -e "    ${CYAN}l${NC} | Show last 30 log lines"
+                echo -e "    ${CYAN}a${NC} | Abort installation"
+            fi
+            echo ""
+            read -rp "  => Choice (r/s/l/a): " choice
         fi
-        echo ""
-        read -rp "  => Choice (r/s/l/a): " choice
 
         case "$choice" in
             r|R)
@@ -311,8 +330,12 @@ handle_error() {
                 fi
                 ;;
             s|S)
-                warn "Step skipped: ${label}"
-                return 0
+                if [ "$_STEP_SEVERITY" = "critical" ]; then
+                    echo -e "  ${RED}Skip tidak tersedia untuk step critical.${NC}"
+                else
+                    warn "Step skipped: ${label}"
+                    return 0
+                fi
                 ;;
             l|L)
                 echo ""
@@ -749,9 +772,11 @@ run_install() {
     echo ""
 
     # Step 1: Template
+    _STEP_SEVERITY="recoverable"
     run_step "Cek / download template" check_template
 
     # Step 2: Buat CT
+    _STEP_SEVERITY="critical"
     run_step "Membuat CT ${VMID} (${HOSTNAME})" \
         pct create "${VMID}" \
             "${STORAGE_TMPL}:vztmpl/${TEMPLATE}" \
@@ -770,6 +795,7 @@ run_install() {
     CT_CREATED=true
 
     # Step 3: Start CT
+    _STEP_SEVERITY="critical"
     _wait_ct_ready() {
         pct start "${VMID}" || return 1
         local _t=0
@@ -812,16 +838,19 @@ run_install() {
     pct exec ${VMID} -- timedatectl set-timezone "$TIMEZONE" 2>&1 | _log_pipe
 
     # Step 4: Update & Upgrade
+    _STEP_SEVERITY="recoverable"
     run_step "apt update && apt upgrade" \
         pct exec "${VMID}" -- bash -c 'apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y'
 
     # Step 5: Install LAMP
+    _STEP_SEVERITY="critical"
     run_step "Install LAMP stack (Apache, MySQL, PHP)" \
         pct exec "${VMID}" -- bash -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y \
             apache2 mysql-server php php-mysql php-curl php-gd \
             php-mbstring php-xml php-zip libapache2-mod-php'
 
     # Step 6: Setup Database
+    _STEP_SEVERITY="critical"
     _setup_db() {
         pct exec "${VMID}" -- bash -c '
             DB_NAME="$1"; DB_USER="$2"; DB_PASS="$3"
@@ -835,6 +864,7 @@ run_install() {
     run_step "Setup database MySQL" _setup_db
 
     # Step 7: WordPress
+    _STEP_SEVERITY="critical"
     _install_wordpress() {
         pct exec "${VMID}" -- bash -c '
             cd /tmp && wget -q https://wordpress.org/latest.tar.gz && tar -xzf latest.tar.gz &&
@@ -877,6 +907,7 @@ $(printf "%b" "$SALTS")" wp-config.php
     run_step "Download & install WordPress" _install_wordpress
 
     # Step 8: PHP Config
+    _STEP_SEVERITY="recoverable"
     run_step "Konfigurasi PHP untuk WordPress" \
         pct exec "${VMID}" -- bash -c '
             sed -i "s/upload_max_filesize = .*/upload_max_filesize = 64M/" /etc/php/*/apache2/php.ini &&
@@ -885,6 +916,7 @@ $(printf "%b" "$SALTS")" wp-config.php
             sed -i "s/memory_limit = .*/memory_limit = 256M/" /etc/php/*/apache2/php.ini'
 
     # Step 9: Apache
+    _STEP_SEVERITY="critical"
     _setup_apache() {
         pct exec "${VMID}" -- bash -c 'cat > /etc/apache2/sites-available/000-default.conf << "APACHEEOF"
 <VirtualHost *:80>
@@ -904,6 +936,7 @@ a2enmod rewrite && systemctl restart apache2'
     run_step "Konfigurasi Apache + mod_rewrite" _setup_apache
 
     # Step 10: Health check
+    _STEP_SEVERITY="recoverable"
     local ip_clean="${IP%/*}"
     _health_check() {
         if ! pct exec "${VMID}" -- command -v curl &>/dev/null; then
