@@ -1,4 +1,5 @@
 #!/bin/bash
+set -o pipefail
 
 # ============================================================
 #  Proxmox CT Creator + WordPress Auto Installer  v3.0
@@ -51,7 +52,7 @@ TEMPLATE="ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
 BRIDGE="vmbr0"
 
 # ─── STEP TRACKING ───────────────────────────────────────────
-TOTAL_STEPS=10
+TOTAL_STEPS=11
 CURRENT_STEP=0
 INSTALL_START=0
 _STEP_SEVERITY="recoverable"
@@ -644,13 +645,14 @@ show_dry_run() {
         "[1/${TOTAL_STEPS}] Cek / download template"
         "[2/${TOTAL_STEPS}] pct create ${VMID} (${HOSTNAME})"
         "[3/${TOTAL_STEPS}] pct start ${VMID} + tunggu siap"
-        "[4/${TOTAL_STEPS}] apt-get update && apt-get upgrade"
-        "[5/${TOTAL_STEPS}] Install apache2, mysql-server, php + extensions"
-        "[6/${TOTAL_STEPS}] Setup database MySQL: ${DB_NAME} / ${DB_USER}"
-        "[7/${TOTAL_STEPS}] Download WordPress + konfigurasi wp-config.php"
-        "[8/${TOTAL_STEPS}] Konfigurasi PHP untuk WordPress"
-        "[9/${TOTAL_STEPS}] Konfigurasi Apache + aktifkan mod_rewrite"
-        "[10/${TOTAL_STEPS}] Health check WordPress"
+        "[4/${TOTAL_STEPS}] Set timezone CT"
+        "[5/${TOTAL_STEPS}] apt-get update && apt-get upgrade"
+        "[6/${TOTAL_STEPS}] Install apache2, mysql-server, php + extensions"
+        "[7/${TOTAL_STEPS}] Setup database MySQL: ${DB_NAME} / ${DB_USER}"
+        "[8/${TOTAL_STEPS}] Download WordPress + konfigurasi wp-config.php"
+        "[9/${TOTAL_STEPS}] Konfigurasi PHP untuk WordPress"
+        "[10/${TOTAL_STEPS}] Konfigurasi Apache + aktifkan mod_rewrite"
+        "[11/${TOTAL_STEPS}] Health check WordPress"
     )
     for step in "${steps[@]}"; do
         echo -e "  ${DIM}o${NC}  ${step}"
@@ -767,6 +769,7 @@ custom_install() {
 run_install() {
     [ "$EUID" -ne 0 ] && error "Script harus dijalankan sebagai root"
 
+    local ip_clean="${IP%/*}"
     section "Memulai Instalasi"
     INSTALL_START=$(date +%s)
     echo ""
@@ -834,22 +837,23 @@ run_install() {
     _check_url "https://wordpress.org"
     log "Koneksi internet CT OK"
 
-    # Set timezone
-    pct exec ${VMID} -- timedatectl set-timezone "$TIMEZONE" 2>&1 | _log_pipe
+    # Step 4: Set timezone
+    _STEP_SEVERITY="recoverable"
+    run_step "Set timezone CT" pct exec "${VMID}" -- timedatectl set-timezone "$TIMEZONE"
 
-    # Step 4: Update & Upgrade
+    # Step 5: Update & Upgrade
     _STEP_SEVERITY="recoverable"
     run_step "apt update && apt upgrade" \
         pct exec "${VMID}" -- bash -c 'apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y'
 
-    # Step 5: Install LAMP
+    # Step 6: Install LAMP
     _STEP_SEVERITY="critical"
     run_step "Install LAMP stack (Apache, MySQL, PHP)" \
         pct exec "${VMID}" -- bash -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y \
             apache2 mysql-server php php-mysql php-curl php-gd \
             php-mbstring php-xml php-zip libapache2-mod-php'
 
-    # Step 6: Setup Database
+    # Step 7: Setup Database
     _STEP_SEVERITY="critical"
     _setup_db() {
         pct exec "${VMID}" -- bash -c '
@@ -863,7 +867,7 @@ run_install() {
     }
     run_step "Setup database MySQL" _setup_db
 
-    # Step 7: WordPress
+    # Step 8: WordPress
     _STEP_SEVERITY="critical"
     _install_wordpress() {
         pct exec "${VMID}" -- bash -c '
@@ -906,7 +910,7 @@ $(printf "%b" "$SALTS")" wp-config.php
     }
     run_step "Download & install WordPress" _install_wordpress
 
-    # Step 8: PHP Config
+    # Step 9: PHP Config
     _STEP_SEVERITY="recoverable"
     run_step "Konfigurasi PHP untuk WordPress" \
         pct exec "${VMID}" -- bash -c '
@@ -915,7 +919,7 @@ $(printf "%b" "$SALTS")" wp-config.php
             sed -i "s/max_execution_time = .*/max_execution_time = 300/" /etc/php/*/apache2/php.ini &&
             sed -i "s/memory_limit = .*/memory_limit = 256M/" /etc/php/*/apache2/php.ini'
 
-    # Step 9: Apache
+    # Step 10: Apache
     _STEP_SEVERITY="critical"
     _setup_apache() {
         pct exec "${VMID}" -- bash -c 'cat > /etc/apache2/sites-available/000-default.conf << "APACHEEOF"
@@ -935,9 +939,8 @@ a2enmod rewrite && systemctl restart apache2'
     }
     run_step "Konfigurasi Apache + mod_rewrite" _setup_apache
 
-    # Step 10: Health check
+    # Step 11: Health check
     _STEP_SEVERITY="recoverable"
-    local ip_clean="${IP%/*}"
     _health_check() {
         if ! pct exec "${VMID}" -- command -v curl &>/dev/null; then
             echo 'curl not found, installing...'
@@ -959,7 +962,6 @@ a2enmod rewrite && systemctl restart apache2'
     INSTALL_SUCCESS=true
     local total_elapsed
     total_elapsed=$(format_time $(( $(date +%s) - INSTALL_START )))
-    local ip_clean="${IP%/*}"
 
     echo ""
     if $FANCY; then
