@@ -3,20 +3,22 @@ set -o pipefail
 
 # ============================================================
 #  Proxmox CT Creator + WordPress Auto Installer  v3.0
-#  Flags: --verbose | --fancy | --dry-run
-#  Usage: ./wordpress-ct-setup-v3.sh [--verbose] [--fancy] [--dry-run]
+#  Flags: --verbose | --fancy | --dry-run | --quick
+#  Usage: ./wordpress-ct-setup-v3.sh [--verbose] [--fancy] [--dry-run] [--quick]
 # ============================================================
 
 # ─── FLAG PARSING ────────────────────────────────────────────
 VERBOSE=false
 FANCY=false
 DRY_RUN=false
+QUICK=false
 
 for arg in "$@"; do
     case "$arg" in
         --verbose) VERBOSE=true ;;
         --fancy)   FANCY=true ;;
         --dry-run) DRY_RUN=true ;;
+        --quick)   QUICK=true ;;
     esac
 done
 
@@ -401,6 +403,7 @@ BANNER
     $VERBOSE && flags+=" ${YELLOW}[verbose]${NC}"
     $FANCY   && flags+=" ${CYAN}[fancy]${NC}"
     $DRY_RUN && flags+=" ${BLUE}[dry-run]${NC}"
+    $QUICK   && flags+=" ${GREEN}[quick]${NC}"
     [ -n "$flags" ] && echo -e "  ${DIM}Flags:${NC}${flags}" && echo ""
 
     echo -e "  ${DIM}Log:${NC} ${LOG_FILE}"
@@ -415,6 +418,15 @@ get_input() {
     local default="$2"
     local validator="$3"
     local hide="$4"
+
+    # --quick: auto-accept default if available
+    if $QUICK && [ -n "$default" ]; then
+        INPUT_RESULT="$default"
+        return
+    fi
+    if $QUICK && [ -z "$default" ]; then
+        warn "--quick mode tapi field ini wajib diisi"
+    fi
 
     while true; do
         local display
@@ -459,6 +471,10 @@ get_password_input() {
     local prompt="$1"
     local generated
     generated=$(gen_password)
+    if $QUICK; then
+        INPUT_RESULT="$generated"
+        return
+    fi
     while true; do
         echo -e "  => ${prompt} [generated: ${GREEN}${generated}${NC}, Enter=pakai ini, atau ketik sendiri]"
         read -rs -p "  => " INPUT_RESULT
@@ -665,43 +681,9 @@ show_dry_run() {
     exit 0
 }
 
-# ─── MODE: QUICK INSTALL ─────────────────────────────────────
-quick_install() {
-    section "Quick Install"
-    echo ""
-    info "Disk / CPU / Memory / Swap & DB menggunakan nilai default"
-    info "Hanya perlu isi: VMID, Hostname, Password, IP"
-    echo ""
-
-    get_input "VMID" "$DEFAULT_VMID" "validate_vmid"
-    VMID="$INPUT_RESULT"
-
-    get_input "Hostname" "$DEFAULT_HOSTNAME"
-    HOSTNAME="$INPUT_RESULT"
-
-    get_password_input "Password CT"
-    PASSWORD="$INPUT_RESULT"
-
-    get_input "IP Address (contoh: 192.168.10.5/24)" "" "validate_ip_cidr"
-    IP="$INPUT_RESULT"
-
-    GW=$(derive_gateway "$IP")
-    info "Gateway otomatis: ${GW}"
-
-    DISK=$DEFAULT_DISK
-    CPU=$DEFAULT_CPU
-    MEMORY=$DEFAULT_MEMORY
-    SWAP=$DEFAULT_SWAP
-    DB_NAME=$DEFAULT_DB_NAME
-    DB_USER=$DEFAULT_DB_USER
-    get_password_input "DB Password"
-    DB_PASS="$INPUT_RESULT"
-    TIMEZONE="Asia/Jakarta"
-}
-
-# ─── MODE: CUSTOM INSTALL ────────────────────────────────────
-custom_install() {
-    section "Custom Install"
+# ─── GATHER INPUT ─────────────────────────────────────────────
+gather_input() {
+    section "Konfigurasi"
     echo ""
 
     info "[ Identitas Container ]"
@@ -715,7 +697,7 @@ custom_install() {
     PASSWORD="$INPUT_RESULT"
 
     echo ""
-    info "[ Spesifikasi ] Tekan Enter untuk nilai default"
+    info "[ Spesifikasi ]"
 
     get_input "Disk (GB)" "$DEFAULT_DISK" "validate_number"
     DISK="$INPUT_RESULT"
@@ -747,7 +729,7 @@ custom_install() {
     GW="$INPUT_RESULT"
 
     echo ""
-    info "[ Database WordPress ] Tekan Enter untuk nilai default"
+    info "[ Database WordPress ]"
 
     get_input "DB Name" "$DEFAULT_DB_NAME"
     DB_NAME="$INPUT_RESULT"
@@ -1009,32 +991,7 @@ main() {
     fi
 
     show_banner
-
-    if $FANCY; then
-        echo -e "  ${BOLD}Select Installation Mode:${NC}"
-        echo ""
-        echo -e "    ${GREEN}${BOLD}1${NC}  │  Quick Install    ${DIM}─ minimal input, auto defaults${NC}"
-        echo -e "    ${BLUE}${BOLD}2${NC}  │  Custom Install   ${DIM}─ full control over config${NC}"
-        echo -e "    ${DIM}0${NC}  │  Exit"
-    else
-        echo -e "  ${BOLD}Select Installation Mode:${NC}"
-        echo ""
-        echo -e "    ${GREEN}${BOLD}1${NC}  |  Quick Install    ${DIM}-- minimal input, auto defaults${NC}"
-        echo -e "    ${BLUE}${BOLD}2${NC}  |  Custom Install   ${DIM}-- full control over config${NC}"
-        echo -e "    ${DIM}0${NC}  |  Exit"
-    fi
-    echo ""
-
-    while true; do
-        read -rp "  => Mode (0/1/2): " choice
-        case "$choice" in
-            1) quick_install; break ;;
-            2) custom_install; break ;;
-            0) echo ""; info "Exit."; exit 0 ;;
-            *) echo -e "  ${RED}Invalid.${NC} Enter 1, 2, or 0." ;;
-        esac
-    done
-
+    gather_input
     show_summary
     $DRY_RUN && show_dry_run
     confirm_proceed
