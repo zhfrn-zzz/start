@@ -3,9 +3,19 @@ set -o pipefail
 
 # ============================================================
 #  proxipress — Proxmox + WordPress in one shot
-#  Version: 4.0
+#  Version: 4.1
 #  Flags: --verbose | --fancy | --dry-run | --quick
 #  Usage: ./proxipress.sh [--verbose] [--fancy] [--dry-run] [--quick]
+#
+#  v4.1 changes:
+#    - Fix: cleanup_on_exit guard double-execution (INT + EXIT trap)
+#    - Fix: error path (non-interrupt) now offers CT cleanup prompt
+#    - Fix: WordPress salt insertion via 'sed r' (was unreliable via 'sed a\')
+#    - Fix: validate_password rejects glob chars (* ? [ ]) and whitespace
+#    - Refactor: _setup_db & _install_wordpress now use 'pct push' pattern
+#                (eliminates bash-in-bash-in-pct-exec escaping)
+#    - Cleanup: remove redundant '2>&1' after '&>/dev/null' in validate_vmid
+#    - UX: single-line password prompt
 # ============================================================
 
 # ─── FLAG PARSING ────────────────────────────────────────────
@@ -73,27 +83,50 @@ format_time() {
 CT_CREATED=false
 INSTALL_SUCCESS=false
 INTERRUPTED=false
+_CLEANED_UP=false
+
+_prompt_delete_ct() {
+    local reason="$1"
+    [ -z "$VMID" ] && return
+    $CT_CREATED || return
+    echo ""
+    read -rp "  => ${reason} Hapus CT ${VMID}? (y/n): " del_choice
+    if [[ "$del_choice" =~ ^[yY]$ ]]; then
+        pct stop "$VMID" --force 2>/dev/null
+        if pct destroy "$VMID" 2>/dev/null; then
+            echo -e "  ${GREEN}[+]${NC} CT ${VMID} dihapus."
+        else
+            echo -e "  ${YELLOW}[!]${NC} Gagal menghapus CT ${VMID}."
+        fi
+    fi
+}
 
 cleanup_on_exit() {
+    # Guard: cegah eksekusi ganda (INT trap + EXIT trap)
+    $_CLEANED_UP && return
+    _CLEANED_UP=true
+
+    # Hentikan spinner & restore cursor — selalu dilakukan
     if [ -n "$SPINNER_PID" ]; then
         kill "$SPINNER_PID" 2>/dev/null
         wait "$SPINNER_PID" 2>/dev/null || true
         SPINNER_PID=""
     fi
     tput cnorm 2>/dev/null || true
+
+    # Path sukses: tidak ada yang perlu di-cleanup lagi
     $INSTALL_SUCCESS && return
+
     if $INTERRUPTED; then
+        # Path interrupted: user tekan Ctrl+C
         echo ""
         echo -e "  ${RED}[x]${NC} Interrupted by user."
-        if $CT_CREATED; then
-            read -rp "  => Hapus CT ${VMID} yang setengah jadi? (y/n): " del_choice
-            if [[ "$del_choice" =~ ^[yY]$ ]]; then
-                pct stop "$VMID" --force 2>/dev/null
-                pct destroy "$VMID" 2>/dev/null && \
-                    echo -e "  ${GREEN}[+]${NC} CT ${VMID} dihapus." || \
-                    echo -e "  ${YELLOW}[!]${NC} Gagal menghapus CT ${VMID}."
-            fi
-        fi
+        _prompt_delete_ct ""
+    elif $CT_CREATED; then
+        # Path error: error() dipanggil di luar handle_error (mis. _check_url)
+        # handle_error sudah punya prompt sendiri, tapi error path langsung exit
+        # tidak melaluinya — jadi kita tawarkan cleanup di sini.
+        _prompt_delete_ct "Install gagal."
     fi
 }
 
@@ -383,7 +416,7 @@ show_banner() {
     ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝╚═╝     ╚═╝  ╚═╝╚══════╝╚══════╝╚══════╝
 BANNER
         echo -e "${NC}"
-        echo -e "  ${BOLD}Proxmox + WordPress in one shot${NC}  ${DIM}v4.0${NC}"
+        echo -e "  ${BOLD}Proxmox + WordPress in one shot${NC}  ${DIM}v4.1${NC}"
         echo -e "  ${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     else
         echo -e "${CYAN}${BOLD}"
@@ -396,7 +429,7 @@ BANNER
     |_|                   |_|                       
 BANNER
         echo -e "${NC}"
-        echo -e "  ${BOLD}Proxmox + WordPress in one shot${NC}  ${DIM}v4.0${NC}"
+        echo -e "  ${BOLD}Proxmox + WordPress in one shot${NC}  ${DIM}v4.1${NC}"
         echo -e "  ${DIM}--------------------------------------------------${NC}"
     fi
 
@@ -478,12 +511,10 @@ get_password_input() {
         return
     fi
     while true; do
-        echo -e "  => ${prompt} [generated: ${GREEN}${generated}${NC}, Enter=pakai ini, atau ketik sendiri]"
-        read -rs -p "  => " INPUT_RESULT
+        read -rs -p "  => ${prompt} [generated: ${GREEN}${generated}${NC}, Enter=pakai ini, atau ketik sendiri]: " INPUT_RESULT
         echo ""
         INPUT_RESULT="${INPUT_RESULT:-$generated}"
-        if [ ${#INPUT_RESULT} -lt 12 ]; then
-            echo -e "  ${RED}  Password minimal 12 karakter.${NC}"
+        if ! validate_password "$INPUT_RESULT"; then
             continue
         fi
         break
@@ -497,7 +528,7 @@ validate_vmid() {
         echo -e "  ${RED}  VMID harus angka >= 101.${NC}"
         return 1
     fi
-    if pct status "$v" &>/dev/null 2>&1; then
+    if pct status "$v" &>/dev/null; then
         echo -e "  ${RED}  CT ${v} sudah ada! Gunakan VMID lain.${NC}"
         return 1
     fi
@@ -531,6 +562,13 @@ validate_ip() {
 validate_password() {
     if [ ${#1} -lt 12 ]; then
         echo -e "  ${RED}  Password minimal 12 karakter.${NC}"
+        return 1
+    fi
+    # Reject karakter glob (*?[]) dan whitespace.
+    # Glob char akan menyebabkan log_redact (bash pattern substitution) over-match.
+    # Whitespace akan break parsing di banyak tempat (mis. mysql CREATE USER).
+    if [[ "$1" =~ [\*\?\[\][:space:]] ]]; then
+        echo -e "  ${RED}  Password tidak boleh mengandung: * ? [ ] atau whitespace.${NC}"
         return 1
     fi
     return 0
@@ -838,59 +876,123 @@ run_install() {
             php-mbstring php-xml php-zip libapache2-mod-php'
 
     # Step 7: Setup Database
+    #
+    # Pattern: tulis script ke file temp di host → pct push ke CT → jalankan.
+    # Ini menghindari neraka escaping bash-dalam-bash-dalam-pct-exec, dan
+    # membuat script di CT bisa dibaca/diaudit dengan jelas.
     _STEP_SEVERITY="critical"
     _setup_db() {
-        pct exec "${VMID}" -- bash -c '
-            DB_NAME="$1"; DB_USER="$2"; DB_PASS="$3"
-            ESCAPED_PASS="${DB_PASS//\\/\\\\}"
-            ESCAPED_PASS="${ESCAPED_PASS//'"'"'/\\'"'"'}"
-            mysql -e "CREATE DATABASE \`${DB_NAME}\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" &&
-            mysql -e "CREATE USER '"'"'${DB_USER}'"'"'@'"'"'localhost'"'"' IDENTIFIED BY '"'"'${ESCAPED_PASS}'"'"';" &&
-            mysql -e "GRANT ALL ON \`${DB_NAME}\`.* TO '"'"'${DB_USER}'"'"'@'"'"'localhost'"'"'; FLUSH PRIVILEGES;"
-        ' -- "${DB_NAME}" "${DB_USER}" "${DB_PASS}"
+        local host_tmp
+        host_tmp=$(mktemp) || return 1
+        cat > "$host_tmp" << 'DBSETUP_EOF'
+#!/bin/bash
+set -e
+DB_NAME="$1"
+DB_USER="$2"
+DB_PASS="$3"
+
+# Escape backslash dan single-quote untuk MySQL string literal.
+# MySQL parse '...' string dengan backslash escape sequences (default mode).
+ESCAPED_PASS="${DB_PASS//\\/\\\\}"
+ESCAPED_PASS="${ESCAPED_PASS//\'/\\\'}"
+
+mysql -e "CREATE DATABASE \`${DB_NAME}\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+mysql -e "CREATE USER '${DB_USER}'@'localhost' IDENTIFIED BY '${ESCAPED_PASS}';"
+mysql -e "GRANT ALL ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';"
+mysql -e "FLUSH PRIVILEGES;"
+DBSETUP_EOF
+        pct push "${VMID}" "$host_tmp" /tmp/_setup-db.sh
+        pct exec "${VMID}" -- chmod +x /tmp/_setup-db.sh
+        pct exec "${VMID}" -- /tmp/_setup-db.sh "${DB_NAME}" "${DB_USER}" "${DB_PASS}"
+        local ec=$?
+        pct exec "${VMID}" -- rm -f /tmp/_setup-db.sh
+        rm -f "$host_tmp"
+        return $ec
     }
     run_step "Setup database MySQL" _setup_db
 
     # Step 8: WordPress
+    #
+    # Salt insertion: API wordpress.org/secret-key sudah return real newlines —
+    # tulis langsung ke /tmp/wp-salts.txt. Fallback openssl pakai $'\n' literal.
+    # Insert ke wp-config pakai 'sed r FILE' (file include) bukan 'sed a\' yang
+    # bermasalah dengan multi-line content.
     _STEP_SEVERITY="critical"
     _install_wordpress() {
-        pct exec "${VMID}" -- bash -c '
-            cd /tmp && wget -q https://wordpress.org/latest.tar.gz && tar -xzf latest.tar.gz &&
-            mv wordpress /var/www/html/ &&
-            chown -R www-data:www-data /var/www/html/wordpress &&
-            find /var/www/html/wordpress -type d -exec chmod 755 {} \; &&
-            find /var/www/html/wordpress -type f -exec chmod 644 {} \; &&
-            cd /var/www/html/wordpress &&
-            cp wp-config-sample.php wp-config.php &&
-            if grep -q "put your unique phrase here" wp-config.php; then
-                SALTS=$(curl -sf --max-time 10 https://api.wordpress.org/secret-key/1.1/salt/ 2>/dev/null)
-                if [ -z "$SALTS" ]; then
-                    SALTS=""
-                    for KEY in AUTH_KEY SECURE_AUTH_KEY LOGGED_IN_KEY NONCE_KEY AUTH_SALT SECURE_AUTH_SALT LOGGED_IN_SALT NONCE_SALT; do
-                        VAL=$(openssl rand -base64 64 | tr -d "\n")
-                        SALTS="${SALTS}define('"'"'${KEY}'"'"', '"'"'${VAL}'"'"');\n"
-                    done
-                fi
-                sed -i "/put your unique phrase here/d" wp-config.php
-                MARKER=$(grep -n "Authentication unique keys" wp-config.php | tail -1 | cut -d: -f1)
-                if [ -n "$MARKER" ]; then
-                    sed -i "${MARKER}a\\
-$(printf "%b" "$SALTS")" wp-config.php
-                else
-                    printf "%b" "$SALTS" >> wp-config.php
-                fi
-            fi &&
-            php -r "
-                \$f = '"'"'wp-config.php'"'"';
-                \$c = file_get_contents(\$f);
-                \$c = str_replace('"'"'database_name_here'"'"', \$argv[1], \$c);
-                \$c = str_replace('"'"'username_here'"'"', \$argv[2], \$c);
-                \$c = str_replace('"'"'password_here'"'"', \$argv[3], \$c);
-                file_put_contents(\$f, \$c);
-            " "$1" "$2" "$3" &&
-            chmod 640 /var/www/html/wordpress/wp-config.php &&
-            chown root:www-data /var/www/html/wordpress/wp-config.php
-        ' -- "${DB_NAME}" "${DB_USER}" "${DB_PASS}"
+        local host_tmp
+        host_tmp=$(mktemp) || return 1
+        cat > "$host_tmp" << 'WPINSTALL_EOF'
+#!/bin/bash
+set -e
+DB_NAME="$1"
+DB_USER="$2"
+DB_PASS="$3"
+
+cd /tmp
+wget -q https://wordpress.org/latest.tar.gz
+tar -xzf latest.tar.gz
+mv wordpress /var/www/html/
+chown -R www-data:www-data /var/www/html/wordpress
+find /var/www/html/wordpress -type d -exec chmod 755 {} \;
+find /var/www/html/wordpress -type f -exec chmod 644 {} \;
+
+cd /var/www/html/wordpress
+cp wp-config-sample.php wp-config.php
+
+# Salt keys: idempoten — skip kalau sudah pernah di-set
+if grep -q "put your unique phrase here" wp-config.php; then
+    SALTS=$(curl -sf --max-time 10 https://api.wordpress.org/secret-key/1.1/salt/ 2>/dev/null || true)
+    if [ -z "$SALTS" ]; then
+        # Fallback: generate lokal
+        SALTS=""
+        for KEY in AUTH_KEY SECURE_AUTH_KEY LOGGED_IN_KEY NONCE_KEY \
+                   AUTH_SALT SECURE_AUTH_SALT LOGGED_IN_SALT NONCE_SALT; do
+            VAL=$(openssl rand -base64 64 | tr -d '\n')
+            SALTS="${SALTS}define('${KEY}', '${VAL}');"$'\n'
+        done
+    fi
+
+    # Tulis salts ke temp file lalu insert dengan sed 'r' (lebih reliable
+    # daripada sed 'a\' yang bermasalah untuk multi-line content).
+    printf '%s' "$SALTS" > /tmp/_wp-salts.txt
+
+    sed -i '/put your unique phrase here/d' wp-config.php
+    MARKER=$(grep -n 'Authentication unique keys' wp-config.php | tail -1 | cut -d: -f1)
+    if [ -n "$MARKER" ]; then
+        sed -i "${MARKER}r /tmp/_wp-salts.txt" wp-config.php
+    else
+        cat /tmp/_wp-salts.txt >> wp-config.php
+    fi
+    rm -f /tmp/_wp-salts.txt
+fi
+
+# Validasi: pastikan 8 define salt key ada
+SALT_COUNT=$(grep -cE "^define\( ?'(AUTH|SECURE_AUTH|LOGGED_IN|NONCE)_(KEY|SALT)'" wp-config.php || true)
+if [ "$SALT_COUNT" -lt 8 ]; then
+    echo "WARNING: hanya menemukan $SALT_COUNT define salt key (harusnya 8)"
+fi
+
+# Replace DB credentials pakai PHP — aman untuk karakter spesial apapun
+# karena tidak melalui shell/sed escaping.
+php -r '
+    $f = "wp-config.php";
+    $c = file_get_contents($f);
+    $c = str_replace("database_name_here", $argv[1], $c);
+    $c = str_replace("username_here", $argv[2], $c);
+    $c = str_replace("password_here", $argv[3], $c);
+    file_put_contents($f, $c);
+' "$DB_NAME" "$DB_USER" "$DB_PASS"
+
+chmod 640 wp-config.php
+chown root:www-data wp-config.php
+WPINSTALL_EOF
+        pct push "${VMID}" "$host_tmp" /tmp/_install-wp.sh
+        pct exec "${VMID}" -- chmod +x /tmp/_install-wp.sh
+        pct exec "${VMID}" -- /tmp/_install-wp.sh "${DB_NAME}" "${DB_USER}" "${DB_PASS}"
+        local ec=$?
+        pct exec "${VMID}" -- rm -f /tmp/_install-wp.sh
+        rm -f "$host_tmp"
+        return $ec
     }
     run_step "Download & install WordPress" _install_wordpress
 
